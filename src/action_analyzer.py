@@ -17,9 +17,9 @@ changing where `insights` comes from, not the extraction logic below.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 # Keyword synonyms so a single "action of interest" like "jump" also matches
 # related concepts Video Indexer's vision models are more likely to tag.
@@ -99,12 +99,13 @@ def _extract_insights(index_payload: dict[str, Any]) -> dict[str, Any]:
     API version / indexing preset."""
     videos = index_payload.get("videos")
     if isinstance(videos, list) and videos:
-        insights = videos[0].get("insights")
+        first_video = cast("dict[str, Any]", videos[0])
+        insights = first_video.get("insights")
         if isinstance(insights, dict):
-            return insights
+            return cast("dict[str, Any]", insights)
     insights = index_payload.get("insights")
     if isinstance(insights, dict):
-        return insights
+        return cast("dict[str, Any]", insights)
     return {}
 
 
@@ -115,10 +116,11 @@ def _video_duration_seconds(
     duration = insights.get("duration") or index_payload.get("durationInSeconds")
     if isinstance(duration, dict):
         # Some responses nest as {"time": "HH:MM:SS.fff", "seconds": ...}
-        if "seconds" in duration:
-            return float(duration["seconds"])
-        if "time" in duration:
-            return _timestamp_to_seconds(duration["time"])
+        duration_dict = cast("dict[str, Any]", duration)
+        if "seconds" in duration_dict:
+            return float(duration_dict["seconds"])
+        if "time" in duration_dict:
+            return _timestamp_to_seconds(duration_dict["time"])
     if isinstance(duration, (int, float)):
         return float(duration)
     return None
@@ -129,37 +131,51 @@ def _matches(term: str, needles: Iterable[str]) -> bool:
     return any(needle in term_lower for needle in needles)
 
 
+def _iter_valid_instances(
+    item: dict[str, Any],
+) -> Iterator[tuple[float, float, float | None]]:
+    """Yield (start_seconds, end_seconds, confidence) for every instance of
+    one labels/keywords item that has usable start/end timestamps. Shared by
+    `_events_from_bucket` and `_all_events_from_bucket` so the instance-level
+    parsing (and its error handling) exists in exactly one place."""
+    raw_instances = cast("list[Any]", item.get("instances") or [])
+    for raw_instance in raw_instances:
+        instance = cast("dict[str, Any]", raw_instance)
+        start = instance.get("start")
+        end = instance.get("end")
+        if start is None or end is None:
+            continue
+        try:
+            start_s = _timestamp_to_seconds(start)
+            end_s = _timestamp_to_seconds(end)
+        except ValueError:
+            continue
+        confidence = instance.get("confidence", item.get("confidence"))
+        yield start_s, end_s, float(confidence) if confidence is not None else None
+
+
 def _events_from_bucket(
     bucket: Any, source: str, needles: list[str]
 ) -> list[ActionEvent]:
-    events: list[ActionEvent] = []
     if not isinstance(bucket, list):
-        return events
+        return []
 
-    for item in bucket:
+    events: list[ActionEvent] = []
+    for raw_item in cast("list[Any]", bucket):
+        item = cast("dict[str, Any]", raw_item)
         name = item.get("name") or item.get("text") or ""
         if not name or not _matches(name, needles):
             continue
-        for instance in item.get("instances", []) or []:
-            start = instance.get("start")
-            end = instance.get("end")
-            if start is None or end is None:
-                continue
-            try:
-                start_s = _timestamp_to_seconds(start)
-                end_s = _timestamp_to_seconds(end)
-            except ValueError:
-                continue
-            confidence = instance.get("confidence", item.get("confidence"))
-            events.append(
-                ActionEvent(
-                    source=source,
-                    matched_term=name,
-                    start_seconds=start_s,
-                    end_seconds=end_s,
-                    confidence=float(confidence) if confidence is not None else None,
-                )
+        events.extend(
+            ActionEvent(
+                source=source,
+                matched_term=name,
+                start_seconds=start_s,
+                end_seconds=end_s,
+                confidence=confidence,
             )
+            for start_s, end_s, confidence in _iter_valid_instances(item)
+        )
     return events
 
 
@@ -243,34 +259,25 @@ class AllActionsReport:
 def _all_events_from_bucket(bucket: Any, source: str) -> list[DetectedAction]:
     """Like `_events_from_bucket`, but keeps every item regardless of name
     (no keyword/synonym filtering) -- used to build the full timeline."""
-    events: list[DetectedAction] = []
     if not isinstance(bucket, list):
-        return events
+        return []
 
-    for item in bucket:
+    events: list[DetectedAction] = []
+    for raw_item in cast("list[Any]", bucket):
+        item = cast("dict[str, Any]", raw_item)
         name = item.get("name") or item.get("text") or ""
         if not name:
             continue
-        for instance in item.get("instances", []) or []:
-            start = instance.get("start")
-            end = instance.get("end")
-            if start is None or end is None:
-                continue
-            try:
-                start_s = _timestamp_to_seconds(start)
-                end_s = _timestamp_to_seconds(end)
-            except ValueError:
-                continue
-            confidence = instance.get("confidence", item.get("confidence"))
-            events.append(
-                DetectedAction(
-                    name=name,
-                    source=source,
-                    start_seconds=start_s,
-                    end_seconds=end_s,
-                    confidence=float(confidence) if confidence is not None else None,
-                )
+        events.extend(
+            DetectedAction(
+                name=name,
+                source=source,
+                start_seconds=start_s,
+                end_seconds=end_s,
+                confidence=confidence,
             )
+            for start_s, end_s, confidence in _iter_valid_instances(item)
+        )
     return events
 
 
@@ -300,8 +307,10 @@ def analyze_all(
 
     actions.sort(key=lambda a: (a.start_seconds, a.name))
 
-    people = insights.get("observedPeople") or insights.get("people") or []
-    distinct_people = len(people) if isinstance(people, list) else 0
+    raw_people: Any = insights.get("observedPeople") or insights.get("people") or []
+    distinct_people = (
+        len(cast("list[Any]", raw_people)) if isinstance(raw_people, list) else 0
+    )
 
     return AllActionsReport(
         video_duration_seconds=duration,
@@ -335,8 +344,10 @@ def analyze(
 
     events.sort(key=lambda e: e.start_seconds)
 
-    people: list[dict[str, Any]] = insights.get("observedPeople") or insights.get("people") or []
-    distinct_people = len(people) if isinstance(people, list) else 0
+    raw_people: Any = insights.get("observedPeople") or insights.get("people") or []
+    distinct_people = (
+        len(cast("list[Any]", raw_people)) if isinstance(raw_people, list) else 0
+    )
 
     report = ActionReport(
         action=action,

@@ -303,6 +303,58 @@ class VideoIndexerClient:
             time.sleep(self._settings.poll_interval_seconds)
 
     # ------------------------------------------------------------------
+    # Source file download (lets a video be reused by --video-id alone,
+    # without also needing the original file on hand)
+    # ------------------------------------------------------------------
+    def get_video_download_url(self, video_id: str) -> str:
+        """Get a short-lived SAS URL for downloading the original source
+        video file Video Indexer stored for `video_id`."""
+        token = self._ensure_token()
+        url = (
+            f"{DATA_PLANE_BASE_URL}/{self._settings.location}/Accounts/"
+            f"{self._settings.account_id}/Videos/{video_id}/SourceFile/DownloadUrl"
+        )
+        response = self._session.get(url, params={"accessToken": token}, timeout=30)
+        if not response.ok:
+            raise VideoIndexerError(
+                f"Get source download URL failed ({response.status_code}): {response.text}"
+            )
+        download_url = response.json()
+        if not isinstance(download_url, str) or not download_url:
+            raise VideoIndexerError(
+                f"Unexpected source download URL response: {response.text}"
+            )
+        return download_url
+
+    def download_video(self, video_id: str, dest_path: Path) -> Path:
+        """Download the original source video file for `video_id` to
+        `dest_path`, streaming so large files don't need to fit in memory.
+        Returns `dest_path`."""
+        download_url = self.get_video_download_url(video_id)
+        dest_path = Path(dest_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Downloading source video for %s to %s ...", video_id, dest_path)
+        # The SAS URL is pre-authenticated (blob storage), not a Video
+        # Indexer data-plane endpoint, so no accessToken is sent here.
+        with self._session.get(download_url, stream=True, timeout=600) as response:
+            if not response.ok:
+                raise VideoIndexerError(
+                    f"Downloading source video failed ({response.status_code}): "
+                    f"{response.text[:500]}"
+                )
+            with dest_path.open("wb") as fh:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
+
+        size = dest_path.stat().st_size
+        if size == 0:
+            raise VideoIndexerError(f"Downloaded source video for {video_id} is empty.")
+        logger.info("Downloaded source video (%d bytes)", size)
+        return dest_path
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
     def index_video(self, video_path: Path, name: str | None = None) -> dict[str, Any]:

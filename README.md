@@ -6,6 +6,9 @@ specific action of interest (default: **"jumping"**) and produces an
 oversight report: a console summary, a JSON file, and a self-contained HTML
 timeline you can open in any browser.
 
+Built and tested against the sample video `people_jumping.mp4` you provided 
+(jumping, id = qxxv5h1be9) (boxing, id = tuxagrberr).
+
 ## How it works
 
 ```
@@ -28,12 +31,17 @@ your video ──▶ Video Indexer (upload + AI analysis) ──▶ insights JSO
   actions" report below.
 - `src/report.py` — renders the results as text/JSON/HTML, for both the
   single-action and all-actions reports.
+- `src/video_annotator.py` — burns a per-frame "active actions" overlay into
+  a copy of the video, for actions above a confidence threshold.
 - `main.py` — the CLI that searches for one action of interest.
 - `detect_all_actions.py` — the CLI that reports every action Video Indexer
   detected in the video (see "Detecting every action in a video" below).
-- `tests/` — unit tests that verify the extraction/reporting logic against a
-  realistic sample insights payload, so you can trust the code without
-  needing a live Azure account to run the test suite.
+- `annotate_video.py` — the CLI that saves an annotated video (see "Saving
+  an annotated video" below).
+- `tests/` — unit tests that verify the extraction/reporting/annotation
+  logic against a realistic sample insights payload (and a tiny synthetic
+  clip for the annotator), so you can trust the code without needing a live
+  Azure account to run the test suite.
 
 ## Azure setup (one-time)
 
@@ -64,11 +72,6 @@ you already use to talk to Azure works here too:
 ## Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/vaibhav-k/azure-video-action-monitoring.git
-```
-
-```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -94,13 +97,6 @@ re-uploading with:
 ```bash
 python main.py --video people_jumping.mp4 --action jumping --video-id <id-from-first-run>
 ```
-
-IDs of some uploaded videos:
-
-Video content | ID |
------------|----|
-jumping |	qxxv5h1be9
-boxing | tuxagrberr
 
 Outputs land in `./output/`:
 
@@ -150,6 +146,61 @@ Extra flag:
 Same caveat as above applies here too: this reports whatever Video Indexer's
 default model tagged in `labels`/`keywords` — it is not a dedicated action
 classifier, so it's a strong first pass, not a guaranteed-recall detector.
+
+## Saving an annotated video
+
+`annotate_video.py` renders a copy of the video with a burned-in overlay
+listing every action active at each moment, for whichever actions clear a
+confidence threshold you choose:
+
+```bash
+# Only have a video ID? No local file needed -- its source gets downloaded for you.
+python annotate_video.py --video-id qxxv5h1be9 --min-confidence 0.6
+
+# Have the local file too? Skip the download and read frames straight from it.
+python annotate_video.py --video people_jumping.mp4 --video-id qxxv5h1be9 --min-confidence 0.6
+```
+
+You need **at least one** of `--video` / `--video-id` — not both:
+
+- `--video` alone — uploads and indexes it from scratch, then annotates that
+  same local file.
+- `--video-id` alone — reuses an already-indexed video's insights, and
+  downloads its source file from Video Indexer to get frames from (saved to
+  `<out-dir>/<video-id>.source.mp4`, reused on subsequent runs).
+- both — reuses the insights (skips re-uploading) *and* reads frames from
+  the local file (skips the download); the fastest combination if you have
+  both on hand.
+
+The actions to draw come from the same insights call as above, unless you
+add `--report output/<video>.all_actions.json` to reuse a report already
+saved by `detect_all_actions.py` instead (skips the insights call, though a
+video source is still needed for frames per the rules above).
+
+Important honest caveat: Video Indexer's `labels`/`keywords` insights are
+frame-level tags with no spatial coordinates for the general model used
+here, so the overlay is a caption box listing what's active (e.g. "boxing
+(0.97)"), not a box drawn around the person doing it.
+
+Flags:
+
+- `--min-confidence <0.0-1.0>` — only draw actions with confidence at or
+  above this. Default: `0.5`. Unlike the other two scripts, actions with no
+  confidence score are **excluded** by default here (a threshold can't be
+  compared against an unknown score) — pass `--include-unscored` to draw
+  them regardless of the threshold.
+- `--max-lines <n>` — cap simultaneous action lines drawn per frame before
+  collapsing the rest into a "+N more" line. Default: `6`.
+- `--out <path>` — output video path. Default: `<out-dir>/<name>.annotated.mp4`.
+- `--out-dir <dir>` — directory for default outputs, including a downloaded
+  source file when `--video` is omitted. Default: `./output`.
+- `--no-audio` — skip audio muxing even if `ffmpeg` is available (faster,
+  silent output).
+
+Requires `opencv-python-headless` (in `requirements.txt`) to render frames,
+and **`ffmpeg` on your `PATH`** to carry the original audio track over —
+without it, the output is silent and a warning is logged; the video itself
+still renders fine either way.
 
 ## Running the tests
 

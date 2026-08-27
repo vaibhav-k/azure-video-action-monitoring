@@ -14,9 +14,6 @@ from typing import Any
 from .action_analyzer import ActionReport, AllActionsReport
 
 
-TBODY_TABLE = "</tbody></table>"
-
-
 def _fmt_seconds(value: float | None) -> str:
     """Render seconds as MM:SS.ss, or 'n/a' when the value is unknown."""
     if value is None:
@@ -146,8 +143,8 @@ def write_html(report: ActionReport, video_name: str, path: Path) -> None:
         )
         timeline_html = ""
     else:
-        rows: list[str] = []
-        bars: list[str] = []
+        rows = []
+        bars = []
         for e in report.events:
             conf = f"{e.confidence:.2f}" if e.confidence is not None else "n/a"
             rows.append(
@@ -177,7 +174,7 @@ def write_html(report: ActionReport, video_name: str, path: Path) -> None:
             "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
             "<th>Matched term</th><th>Confidence</th></tr></thead><tbody>"
             + "".join(rows)
-            + TBODY_TABLE
+            + "</tbody></table>"
         )
         timeline_html = (
             f'<div class="bar-track">{"".join(bars)}</div><p></p>'
@@ -372,9 +369,9 @@ def write_html_all(report: AllActionsReport, video_name: str, path: Path) -> Non
     summaries = report.summaries
 
     # One timeline lane per distinct action, in first-occurrence order.
-    lanes: list[str] = []
+    lanes = []
     for s in summaries:
-        bars: list[str] = []
+        bars = []
         if duration > 0:
             for a in report.actions:
                 if a.name != s.name:
@@ -399,7 +396,7 @@ def write_html_all(report: AllActionsReport, video_name: str, path: Path) -> Non
         else "<p>Video duration unknown; timeline omitted.</p>"
     )
 
-    summary_rows: list[str] = []
+    summary_rows = []
     for s in summaries:
         conf = f"{s.max_confidence:.2f}" if s.max_confidence is not None else "n/a"
         summary_rows.append(
@@ -417,10 +414,10 @@ def write_html_all(report: AllActionsReport, video_name: str, path: Path) -> Non
         "<table><thead><tr><th>Action</th><th>Source</th><th>Count</th>"
         "<th>First</th><th>Last</th><th>Total time</th><th>Max conf.</th></tr></thead><tbody>"
         + "".join(summary_rows)
-        + TBODY_TABLE
+        + "</tbody></table>"
     )
 
-    log_rows: list[str] = []
+    log_rows = []
     for a in report.actions:
         conf = f"{a.confidence:.2f}" if a.confidence is not None else "n/a"
         log_rows.append(
@@ -436,7 +433,7 @@ def write_html_all(report: AllActionsReport, video_name: str, path: Path) -> Non
         "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
         "<th>Action</th><th>Confidence</th></tr></thead><tbody>"
         + "".join(log_rows)
-        + TBODY_TABLE
+        + "</tbody></table>"
     )
 
     html = _ALL_ACTIONS_HTML_TEMPLATE.format(
