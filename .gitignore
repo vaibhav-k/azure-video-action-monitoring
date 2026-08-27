@@ -1,0 +1,18 @@
+# Ignore the output directory where build artifacts are stored.
+output/*.html
+output/*.json
+
+# Ignore temporary files created by the operating system or text editors.
+*.tmp
+
+# Ignore pytest cache files.
+.pytest_cache/
+
+# Ignore virtual environment directories.
+.venv/
+
+# Ignore ruff cache files.
+.ruff_cache/
+
+# Ignore the environment file that may contain sensitive information.
+.env

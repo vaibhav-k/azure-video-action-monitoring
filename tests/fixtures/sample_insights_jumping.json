@@ -1,0 +1,52 @@
+{
+  "id": "abc123",
+  "state": "Processed",
+  "durationInSeconds": 42.5,
+  "videos": [
+    {
+      "id": "abc123",
+      "state": "Processed",
+      "insights": {
+        "duration": { "time": "00:00:42.500", "seconds": 42.5 },
+        "labels": [
+          {
+            "id": 1,
+            "name": "person",
+            "instances": [
+              { "start": "00:00:00.000", "end": "00:00:42.500", "confidence": 0.98 }
+            ]
+          },
+          {
+            "id": 2,
+            "name": "jumping",
+            "instances": [
+              { "start": "00:00:03.200", "end": "00:00:04.100", "confidence": 0.87 },
+              { "start": "00:00:11.750", "end": "00:00:12.900", "confidence": 0.81 },
+              { "start": "00:00:27.000", "end": "00:00:28.400", "confidence": 0.76 }
+            ]
+          },
+          {
+            "id": 3,
+            "name": "outdoor",
+            "instances": [
+              { "start": "00:00:00.000", "end": "00:00:42.500", "confidence": 0.95 }
+            ]
+          }
+        ],
+        "keywords": [
+          {
+            "id": 10,
+            "name": "trampoline",
+            "instances": [
+              { "start": "00:00:02.000", "end": "00:00:30.000" }
+            ]
+          }
+        ],
+        "observedPeople": [
+          { "id": 1, "thumbnailId": "thumb-1" },
+          { "id": 2, "thumbnailId": "thumb-2" }
+        ]
+      }
+    }
+  ]
+}
