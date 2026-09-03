@@ -7,6 +7,7 @@ verified end-to-end without needing a live Azure Video Indexer account.
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,11 +20,11 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sample_insights_jumping.jso
 
 
 @pytest.fixture()
-def sample_index():
+def sample_index() -> dict[str, Any]:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
-def test_analyze_finds_all_jumping_label_instances(sample_index):
+def test_analyze_finds_all_jumping_label_instances(sample_index: dict[str, Any]):
     report = analyze(sample_index, action="jumping")
 
     assert report.occurrence_count == 3
@@ -40,14 +41,14 @@ def test_analyze_finds_all_jumping_label_instances(sample_index):
     assert all(e.confidence is not None for e in report.events)
 
 
-def test_analyze_ignores_unrelated_labels(sample_index):
+def test_analyze_ignores_unrelated_labels(sample_index: dict[str, Any]):
     report = analyze(sample_index, action="jumping")
     matched_names = {e.matched_term for e in report.events}
     assert "person" not in matched_names
     assert "outdoor" not in matched_names
 
 
-def test_analyze_supports_extra_synonyms(sample_index):
+def test_analyze_supports_extra_synonyms(sample_index: dict[str, Any]):
     # "trampoline" only appears in keywords and wouldn't match "jump" by
     # default; verify a custom synonym picks it up.
     report = analyze(sample_index, action="jumping", extra_synonyms=["trampoline"])
@@ -56,14 +57,99 @@ def test_analyze_supports_extra_synonyms(sample_index):
 
 
 def test_analyze_missing_action_returns_empty_report():
-    empty_index = {"videos": [{"insights": {"labels": [], "keywords": []}}]}
+    empty_index: dict[str, Any] = {
+        "videos": [{"insights": {"labels": [], "keywords": []}}]
+    }
     report = analyze(empty_index, action="jumping")
     assert report.occurrence_count == 0
     assert report.total_action_seconds == 0.0
     assert report.first_occurrence_seconds is None
 
 
-def test_report_rendering_round_trip(sample_index, tmp_path):
+def test_analyze_cash_matches_currency_ocr_text():
+    # "cash" has no visual-concept vocabulary to match (no label/keyword/
+    # object class for money) -- it only matches via `ocr`, against phrases
+    # that are literally printed on US currency. A bare denomination number
+    # ("100") deliberately isn't a match target (too ambiguous alone); a
+    # motto fragment like "WE TRUST" is.
+    index: dict[str, Any] = {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [],
+                    "keywords": [],
+                    "ocr": [
+                        {
+                            "text": "WE TRUST",
+                            "confidence": 0.998,
+                            "instances": [{"start": "0:00:00.08", "end": "0:00:00.6"}],
+                        },
+                        {
+                            "text": "100",
+                            "confidence": 0.996,
+                            "instances": [{"start": "0:00:00.08", "end": "0:00:03"}],
+                        },
+                    ],
+                }
+            }
+        ]
+    }
+    report = analyze(index, action="cash")
+
+    matched_names = {e.matched_term for e in report.events}
+    assert matched_names == {"WE TRUST"}
+    assert report.events[0].source == "ocr"
+
+
+def test_analyze_phone_matches_derived_person_using_phone_overlap():
+    # "phone" matches the "cell phone" object directly (substring match,
+    # same as any other action search) *and* the composite "person using
+    # phone" derived from that same object overlapping a person label --
+    # both are legitimate, independent hits for "--action phone".
+    index: dict[str, Any] = {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [
+                        {
+                            "name": "person",
+                            "instances": [
+                                {
+                                    "confidence": 1.0,
+                                    "start": "0:00:00",
+                                    "end": "0:00:10",
+                                }
+                            ],
+                        }
+                    ],
+                    "keywords": [],
+                    "detectedObjects": [
+                        {
+                            "displayName": "cell phone",
+                            "instances": [
+                                {
+                                    "confidence": 0.8,
+                                    "start": "0:00:03",
+                                    "end": "0:00:06",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    report = analyze(index, action="phone")
+
+    assert report.occurrence_count == 2
+    matched = {(e.matched_term, e.source) for e in report.events}
+    assert matched == {
+        ("cell phone", "objects"),
+        ("person using phone", "derived"),
+    }
+
+
+def test_report_rendering_round_trip(sample_index: dict[str, Any], tmp_path: Path):
     report = analyze(sample_index, action="jumping")
 
     text = to_console_text(report, "people_jumping.mp4")

@@ -7,6 +7,7 @@ the rest of this project's tests.
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,7 +22,13 @@ SAS_URL = (
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, json_data=None, text="", chunks=None):
+    def __init__(
+        self,
+        status_code: int = 200,
+        json_data: Any = None,
+        text: str = "",
+        chunks: list[bytes] | None = None,
+    ):
         self.status_code = status_code
         self.ok = 200 <= status_code < 300
         self._json = json_data
@@ -31,7 +38,7 @@ class FakeResponse:
     def json(self):
         return self._json
 
-    def iter_content(self, chunk_size=1024 * 1024):
+    def iter_content(self, chunk_size: int = 1024 * 1024):
         return iter(self._chunks)
 
     def __enter__(self):
@@ -44,11 +51,17 @@ class FakeResponse:
 class FakeSession:
     """Maps a URL substring to a canned FakeResponse (or a list consumed in order)."""
 
-    def __init__(self, responses: dict):
+    def __init__(self, responses: dict[str, FakeResponse]):
         self._responses = responses
         self.requested_urls: list[str] = []
 
-    def get(self, url, params=None, timeout=None, stream=None):
+    def get(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        timeout: int | None = None,
+        stream: bool | None = None,
+    ):
         self.requested_urls.append(url)
         for substring, response in self._responses.items():
             if substring in url:
@@ -57,7 +70,7 @@ class FakeSession:
 
 
 @pytest.fixture()
-def settings():
+def settings() -> Settings:
     return Settings(
         subscription_id="sub-id",
         resource_group="rg",
@@ -67,13 +80,13 @@ def settings():
     )
 
 
-def _client_with_token(settings, session) -> VideoIndexerClient:
+def _client_with_token(settings: Settings, session: FakeSession) -> VideoIndexerClient:
     client = VideoIndexerClient(settings, session=session)
     client._vi_access_token = "fake-token"  # skip Azure AD / ARM auth entirely
     return client
 
 
-def test_get_video_download_url_returns_sas_url(settings):
+def test_get_video_download_url_returns_sas_url(settings: Settings):
     session = FakeSession({"SourceFile/DownloadUrl": FakeResponse(json_data=SAS_URL)})
     client = _client_with_token(settings, session)
 
@@ -83,7 +96,7 @@ def test_get_video_download_url_returns_sas_url(settings):
     assert any("video-123/SourceFile/DownloadUrl" in u for u in session.requested_urls)
 
 
-def test_get_video_download_url_raises_on_failure(settings):
+def test_get_video_download_url_raises_on_failure(settings: Settings):
     session = FakeSession(
         {"SourceFile/DownloadUrl": FakeResponse(status_code=404, text="not found")}
     )
@@ -93,7 +106,7 @@ def test_get_video_download_url_raises_on_failure(settings):
         client.get_video_download_url("missing-video")
 
 
-def test_get_video_download_url_raises_on_unexpected_body(settings):
+def test_get_video_download_url_raises_on_unexpected_body(settings: Settings):
     session = FakeSession(
         {"SourceFile/DownloadUrl": FakeResponse(json_data={"not": "a url"})}
     )
@@ -103,7 +116,9 @@ def test_get_video_download_url_raises_on_unexpected_body(settings):
         client.get_video_download_url("video-123")
 
 
-def test_download_video_writes_streamed_content_to_dest(settings, tmp_path):
+def test_download_video_writes_streamed_content_to_dest(
+    settings: Settings, tmp_path: Path
+):
     session = FakeSession(
         {
             "SourceFile/DownloadUrl": FakeResponse(json_data=SAS_URL),
@@ -121,7 +136,9 @@ def test_download_video_writes_streamed_content_to_dest(settings, tmp_path):
     assert dest.read_bytes() == b"hello world"
 
 
-def test_download_video_raises_when_blob_request_fails(settings, tmp_path):
+def test_download_video_raises_when_blob_request_fails(
+    settings: Settings, tmp_path: Path
+):
     session = FakeSession(
         {
             "SourceFile/DownloadUrl": FakeResponse(json_data=SAS_URL),
@@ -136,7 +153,7 @@ def test_download_video_raises_when_blob_request_fails(settings, tmp_path):
         client.download_video("video-123", tmp_path / "video.mp4")
 
 
-def test_download_video_raises_on_empty_download(settings, tmp_path):
+def test_download_video_raises_on_empty_download(settings: Settings, tmp_path: Path):
     session = FakeSession(
         {
             "SourceFile/DownloadUrl": FakeResponse(json_data=SAS_URL),

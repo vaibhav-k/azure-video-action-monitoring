@@ -58,6 +58,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip upload and reuse an already-indexed video ID.",
     )
     parser.add_argument(
+        "--indexing-preset",
+        default=None,
+        help="Video Indexer indexing preset to upload with, e.g. 'Advanced' "
+        "for richer object/people insights (default: whatever the account's "
+        "'Default' preset gives you). Only takes effect on a fresh upload -- "
+        "reusing --video-id keeps whatever preset that video was originally "
+        "indexed with.",
+    )
+    parser.add_argument(
         "--out-dir",
         default=Path("output"),
         type=Path,
@@ -138,7 +147,11 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("Reusing existing video id=%s", args.video_id)
             index = client.wait_for_processing(args.video_id)
         else:
-            video_id = client.upload_video(args.video, name=args.name)
+            video_id = client.upload_video(
+                args.video,
+                name=args.name,
+                indexing_preset=args.indexing_preset or "Default",
+            )
             logger.info(
                 "Video uploaded (id=%s). Save this ID to re-run analysis "
                 "without re-uploading via --video-id.",

@@ -13,6 +13,41 @@ custom-trained model (Custom Vision / Azure ML with a pose or action
 recognition model) -- see README for that upgrade path. This module is
 written so that swapping in a different insights source later only requires
 changing where `insights` comes from, not the extraction logic below.
+
+This also reads the `detectedObjects` insight bucket (source "objects"),
+Video Indexer's object detector -- a fixed ~80-class vocabulary (vehicles,
+furniture, food, sports equipment, etc., the same class list Microsoft's
+generic vision object detector uses everywhere). It does NOT include
+domain-specific objects like money/cash/currency, so no combination of
+`labels`, `keywords`, or `detectedObjects` will ever surface a concept
+that isn't in one of those vocabularies to begin with -- see README
+"Limitations" for what to do when the action/object you need genuinely
+isn't one Video Indexer's default models know about.
+
+It also reads the `ocr` bucket (source "ocr") -- printed/on-screen text
+Video Indexer recognized, regardless of what object it's printed on. This
+is how something like currency becomes detectable at all despite not
+existing in any vision model's object vocabulary: a banknote's printed
+text ("100", "WE TRUST", a serial number) gets read by OCR even though
+detectedObjects has no "money" class. `DEFAULT_SYNONYMS["cash"]` matches
+against phrases known to appear on US currency for this reason. Treat this
+as a manual-review aid more than a reliable auto-detector, though: OCR on
+video frames is noisy (motion blur, rotation, partial frames -- expect
+fragmented/duplicate reads of the same text) and only catches what's both
+in frame and legible, not "cash is present" in general (e.g. currency
+sitting face-down, or a foreign banknote with different printed text,
+won't match).
+
+Finally, `_derive_composite_actions` synthesizes named "composite" actions
+(`COMPOSITE_ACTIONS` in constants.py, source "derived") from temporal
+overlaps between two independently-detected concepts -- e.g. "person using
+phone" isn't a label/object Video Indexer has, but a person-like label and
+a "cell phone" object both present at once is a reasonable, inspectable
+proxy for it. Same honest-caveat pattern as everywhere else in this
+module: an overlap is circumstantial evidence, not a verified claim that
+the person is actually using the phone (they could be nearby without
+touching it) -- treat it the same way as the rest of this module's output,
+as a first pass to review rather than a guaranteed-accurate label.
 """
 
 from __future__ import annotations
@@ -21,14 +56,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-# Keyword synonyms so a single "action of interest" like "jump" also matches
-# related concepts Video Indexer's vision models are more likely to tag.
-DEFAULT_SYNONYMS: dict[str, list[str]] = {
-    "jump": ["jump", "jumping", "jumped", "leap", "leaping", "hop", "hopping"],
-    "fall": ["fall", "falling", "fell", "collapse"],
-    "run": ["run", "running", "sprint", "sprinting"],
-    "fight": ["fight", "fighting", "punch", "kick", "brawl"],
-}
+from src.constants import COMPOSITE_ACTIONS, DEFAULT_SYNONYMS
 
 
 @dataclass
@@ -131,6 +159,23 @@ def _matches(term: str, needles: Iterable[str]) -> bool:
     return any(needle in term_lower for needle in needles)
 
 
+def _item_name(item: dict[str, Any]) -> str:
+    """Resolve the display name of one labels/keywords/detectedObjects item.
+
+    `labels` and `keywords` items use "name" (or occasionally "text");
+    `detectedObjects` items instead use "displayName" (lowercase, e.g.
+    "car") or "type" (capitalized, e.g. "Car") -- checked in this order so
+    the lowercase, human-friendly form is preferred when both are present.
+    """
+    return (
+        item.get("name")
+        or item.get("displayName")
+        or item.get("text")
+        or item.get("type")
+        or ""
+    )
+
+
 def _iter_valid_instances(
     item: dict[str, Any],
 ) -> Iterator[tuple[float, float, float | None]]:
@@ -163,7 +208,7 @@ def _events_from_bucket(
     events: list[ActionEvent] = []
     for raw_item in cast("list[Any]", bucket):
         item = cast("dict[str, Any]", raw_item)
-        name = item.get("name") or item.get("text") or ""
+        name = _item_name(item)
         if not name or not _matches(name, needles):
             continue
         events.extend(
@@ -265,7 +310,7 @@ def _all_events_from_bucket(bucket: Any, source: str) -> list[DetectedAction]:
     events: list[DetectedAction] = []
     for raw_item in cast("list[Any]", bucket):
         item = cast("dict[str, Any]", raw_item)
-        name = item.get("name") or item.get("text") or ""
+        name = _item_name(item)
         if not name:
             continue
         events.extend(
@@ -279,6 +324,69 @@ def _all_events_from_bucket(bucket: Any, source: str) -> list[DetectedAction]:
             for start_s, end_s, confidence in _iter_valid_instances(item)
         )
     return events
+
+
+def _overlap_seconds(
+    a_start: float, a_end: float, b_start: float, b_end: float
+) -> tuple[float, float] | None:
+    """The [start, end] interval where two occurrences overlap, or None if
+    they don't overlap at all."""
+    start = max(a_start, b_start)
+    end = min(a_end, b_end)
+    if end <= start:
+        return None
+    return start, end
+
+
+def _derive_composite_actions(actions: list[DetectedAction]) -> list[DetectedAction]:
+    """Synthesize named composite actions (`COMPOSITE_ACTIONS`, source
+    "derived") from temporal overlaps between two independently-detected
+    concepts already in `actions` -- e.g. a person-like label and a "cell
+    phone" object both present at once, standing in for "person using
+    phone" since Video Indexer has no such label/object of its own.
+
+    Confidence is the min of the two overlapping items' confidences (a
+    composite claim is only as strong as its weaker piece of evidence);
+    an overlap where either side has no confidence value is dropped, since
+    there's nothing meaningful to threshold. Identical (name, start, end)
+    overlaps -- e.g. both a "person" and a "man" label spanning the same
+    interval, each pairing with the same object -- are deduplicated,
+    keeping the highest confidence, so one real overlap doesn't get
+    reported as several near-duplicate rows.
+    """
+    best_by_key: dict[tuple[str, float, float], float | None] = {}
+    for name, left_names, right_names in COMPOSITE_ACTIONS:
+        left_items = [a for a in actions if a.name.lower() in left_names]
+        right_items = [a for a in actions if a.name.lower() in right_names]
+        for left in left_items:
+            for right in right_items:
+                overlap = _overlap_seconds(
+                    left.start_seconds,
+                    left.end_seconds,
+                    right.start_seconds,
+                    right.end_seconds,
+                )
+                if overlap is None:
+                    continue
+                if left.confidence is None or right.confidence is None:
+                    continue
+                confidence = min(left.confidence, right.confidence)
+                key = (name, *overlap)
+                if key not in best_by_key or confidence > cast(
+                    "float", best_by_key[key]
+                ):
+                    best_by_key[key] = confidence
+
+    return [
+        DetectedAction(
+            name=name,
+            source="derived",
+            start_seconds=start_s,
+            end_seconds=end_s,
+            confidence=confidence,
+        )
+        for (name, start_s, end_s), confidence in best_by_key.items()
+    ]
 
 
 def analyze_all(
@@ -299,6 +407,9 @@ def analyze_all(
     actions: list[DetectedAction] = []
     actions.extend(_all_events_from_bucket(insights.get("labels"), "labels"))
     actions.extend(_all_events_from_bucket(insights.get("keywords"), "keywords"))
+    actions.extend(_all_events_from_bucket(insights.get("detectedObjects"), "objects"))
+    actions.extend(_all_events_from_bucket(insights.get("ocr"), "ocr"))
+    actions.extend(_derive_composite_actions(actions))
 
     if min_confidence is not None:
         actions = [
@@ -341,6 +452,34 @@ def analyze(
     events.extend(
         _events_from_bucket(insights.get("keywords"), "keywords", list(needles))
     )
+    events.extend(
+        _events_from_bucket(insights.get("detectedObjects"), "objects", list(needles))
+    )
+    events.extend(_events_from_bucket(insights.get("ocr"), "ocr", list(needles)))
+
+    # Composite ("derived") actions -- e.g. "person using phone" -- aren't
+    # any single label/keyword/object Video Indexer returns, so they can't
+    # be found by filtering one bucket; build every base action first
+    # (unfiltered), derive overlaps from that, then keep only ones whose
+    # composite name matches this search (substring match against e.g.
+    # "phone" or "using phone", same as any other action).
+    all_base_actions = (
+        _all_events_from_bucket(insights.get("labels"), "labels")
+        + _all_events_from_bucket(insights.get("keywords"), "keywords")
+        + _all_events_from_bucket(insights.get("detectedObjects"), "objects")
+        + _all_events_from_bucket(insights.get("ocr"), "ocr")
+    )
+    for derived in _derive_composite_actions(all_base_actions):
+        if _matches(derived.name, needles):
+            events.append(
+                ActionEvent(
+                    source=derived.source,
+                    matched_term=derived.name,
+                    start_seconds=derived.start_seconds,
+                    end_seconds=derived.end_seconds,
+                    confidence=derived.confidence,
+                )
+            )
 
     events.sort(key=lambda e: e.start_seconds)
 

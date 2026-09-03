@@ -14,14 +14,19 @@ Only one of --video / --video-id is required, not both:
     - --video AND --video-id  reuses the insights (skips re-uploading) but
                                reads frames from the local file (skips the
                                download).
-    - --report + --video      reuses a saved detect_all_actions.py report
-                               for the actions (no Azure calls at all).
+    - --report + --video      reuses a saved report for the actions (no
+                               Azure calls at all).
     - --report + --video-id   reuses a saved report for the actions, but
                                still downloads the source file for frames.
+
+--report accepts either report file this project writes: detect_all_actions.py's
+*.all_actions.json (every detected action) or main.py's *.report.json (just
+the occurrences of one --action of interest).
 
 Examples:
     python annotate_video.py --video-id tuxagrberr --min-confidence 0.6
     python annotate_video.py --video tuxagrberr.mp4 --report output/tuxagrberr.all_actions.json
+    python .\annotate_video.py --video-id f9m21irr9l --report ./output/f9m21irr9l.report.json --min-confidence 0.7
 """
 
 from __future__ import annotations
@@ -67,8 +72,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--report",
         default=None,
         type=Path,
-        help="Reuse a *.all_actions.json from detect_all_actions.py for the "
-        "actions instead of calling Video Indexer's insights API.",
+        help="Reuse a saved report for the actions instead of calling Video "
+        "Indexer's insights API: either detect_all_actions.py's "
+        "*.all_actions.json (every action) or main.py's *.report.json "
+        "(occurrences of one --action of interest).",
     )
     parser.add_argument(
         "--name",
@@ -90,8 +97,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-lines",
         type=int,
-        default=6,
-        help="Max simultaneous action lines drawn per frame before collapsing to '+N more'. Default: 6.",
+        default=10,
+        help="Max simultaneous action lines drawn per frame before collapsing to '+N more'. Default: 10.",
     )
     parser.add_argument(
         "--out",
@@ -118,23 +125,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _load_actions_from_report(report_path: Path) -> list[DetectedAction]:
+    """Load actions to draw from a saved report JSON file.
+
+    Accepts either report format this project produces:
+      - detect_all_actions.py's *.all_actions.json: a top-level "actions"
+        list, each item keyed by "name" -- every action detected.
+      - main.py's *.report.json: a top-level "events" list, each item keyed
+        by "matched_term" -- occurrences of the one action searched for via
+        --action. (Both use the same "source"/"start_seconds"/"end_seconds"/
+        "confidence" fields otherwise.)
+    """
     data = json.loads(report_path.read_text(encoding="utf-8"))
+
     actions = data.get("actions")
-    if actions is None:
-        raise VideoAnnotationError(
-            f"{report_path} doesn't look like a detect_all_actions.py report "
-            "(no top-level 'actions' list)."
-        )
-    return [
-        DetectedAction(
-            name=a["name"],
-            source=a["source"],
-            start_seconds=a["start_seconds"],
-            end_seconds=a["end_seconds"],
-            confidence=a.get("confidence"),
-        )
-        for a in actions
-    ]
+    if actions is not None:
+        return [
+            DetectedAction(
+                name=a["name"],
+                source=a["source"],
+                start_seconds=a["start_seconds"],
+                end_seconds=a["end_seconds"],
+                confidence=a.get("confidence"),
+            )
+            for a in actions
+        ]
+
+    events = data.get("events")
+    if events is not None:
+        return [
+            DetectedAction(
+                name=e["matched_term"],
+                source=e["source"],
+                start_seconds=e["start_seconds"],
+                end_seconds=e["end_seconds"],
+                confidence=e.get("confidence"),
+            )
+            for e in events
+        ]
+
+    raise VideoAnnotationError(
+        f"{report_path} doesn't look like a report from this project (no "
+        "top-level 'actions' list as written by detect_all_actions.py, or "
+        "'events' list as written by main.py)."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

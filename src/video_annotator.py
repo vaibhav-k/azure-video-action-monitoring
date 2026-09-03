@@ -26,11 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from .action_analyzer import DetectedAction
+from .constants import DEFAULT_MIN_CONFIDENCE, MAX_OVERLAY_LINES
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MIN_CONFIDENCE = 0.5
-MAX_OVERLAY_LINES = 6  # avoid the caption box swallowing the frame
 
 
 class VideoAnnotationError(RuntimeError):

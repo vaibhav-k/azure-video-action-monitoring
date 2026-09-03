@@ -39,16 +39,15 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .config import Settings
+from .constants import (
+    ARM_API_VERSION,
+    ARM_BASE_URL,
+    DATA_PLANE_BASE_URL,
+    STATE_FAILED,
+    STATE_PROCESSED,
+)
 
 logger = logging.getLogger(__name__)
-
-ARM_BASE_URL = "https://management.azure.com"
-ARM_API_VERSION = "2025-04-01"
-DATA_PLANE_BASE_URL = "https://api.videoindexer.ai"
-
-# Terminal states reported by the Video Indexer processing pipeline.
-STATE_PROCESSED = "Processed"
-STATE_FAILED = "Failed"
 
 
 class VideoIndexerError(RuntimeError):

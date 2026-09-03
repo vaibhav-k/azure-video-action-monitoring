@@ -8,7 +8,7 @@ label/keyword Video Indexer detected -- a full "what happened, and when"
 timeline, grouped by distinct action with per-action counts and durations.
 
 Example:
-    python detect_all_actions.py --video ./people_jumping.mp4
+    python ./detect_all_actions.py --video ./people_jumping.mp4
 
 On first run against a given video, this uploads it to your Azure AI Video
 Indexer account and waits for processing (a few minutes, depending on
@@ -33,6 +33,12 @@ logger = logging.getLogger("azure_action_monitoring.detect_all_actions")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """
+    Build the argument parser for the CLI.
+
+    Returns:
+        argparse.ArgumentParser: The configured argument parser.
+    """
     parser = argparse.ArgumentParser(
         description="Detect and report every action Azure AI Video Indexer finds in a video."
     )
@@ -56,6 +62,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--video-id",
         default=None,
         help="Skip upload and reuse an already-indexed video ID.",
+    )
+    parser.add_argument(
+        "--indexing-preset",
+        default=None,
+        help="Video Indexer indexing preset to upload with, e.g. 'Advanced' "
+        "for richer object/people insights (default: whatever the account's "
+        "'Default' preset gives you). Only takes effect on a fresh upload -- "
+        "reusing --video-id keeps whatever preset that video was originally "
+        "indexed with. Note this still can't surface a concept absent from "
+        "Video Indexer's label/keyword/object vocabulary entirely (e.g. "
+        "'cash') -- see README Limitations.",
     )
     parser.add_argument(
         "--out-dir",
@@ -82,6 +99,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """
+    Main entry point for the CLI.
+
+    Args:
+        argv (list[str] | None): Command-line arguments. If None, uses sys.argv.
+
+    Returns:
+        int: Exit code.
+    """
     args = build_arg_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -107,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             client.get_access_token()
         except VideoIndexerError as exc:
-            logger.error(str(exc))
+            logger.error(exc)
             return 1
         logger.info(
             "Success: obtained a Video Indexer access token. Config and permissions look good."
@@ -143,7 +169,11 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("Reusing existing video id=%s", args.video_id)
             index = client.wait_for_processing(args.video_id)
         else:
-            video_id = client.upload_video(args.video, name=args.name)
+            video_id = client.upload_video(
+                args.video,
+                name=args.name,
+                indexing_preset=args.indexing_preset or "Default",
+            )
             logger.info(
                 "Video uploaded (id=%s). Save this ID to re-run analysis "
                 "without re-uploading via --video-id.",
