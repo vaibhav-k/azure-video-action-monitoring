@@ -11,7 +11,15 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from .action_analyzer import ActionReport, AllActionsReport
+from .action_analyzer import (
+    ActionEvent,
+    ActionReport,
+    ActionSummary,
+    AllActionsReport,
+    DetectedAction,
+)
+
+TBODY_TABLE = "</tbody></table>"
 
 
 def _fmt_seconds(value: float | None) -> str:
@@ -133,6 +141,65 @@ _HTML_TEMPLATE = """<!doctype html>
 """
 
 
+def _render_timeline_bar(
+    start: float, duration: float, total: float, title: str
+) -> str:
+    """One `.bar-fill` div, positioned as a percentage of `total` (the
+    video's overall duration) -- shared by the single-action and
+    all-actions HTML timelines."""
+    left_pct = max(0.0, min(100.0, (start / total) * 100))
+    width_pct = max(0.5, min(100.0 - left_pct, (duration / total) * 100))
+    return (
+        f'<div class="bar-fill" '
+        f'style="left:{left_pct:.2f}%;width:{width_pct:.2f}%" '
+        f'title="{title}"></div>'
+    )
+
+
+def _render_event_row(e: ActionEvent) -> str:
+    """One `<tr>` for a single occurrence in the events table."""
+    conf = f"{e.confidence:.2f}" if e.confidence is not None else "n/a"
+    return (
+        "<tr>"
+        f"<td>{_fmt_seconds(e.start_seconds)}</td>"
+        f"<td>{_fmt_seconds(e.end_seconds)}</td>"
+        f"<td>{escape(e.source)}</td>"
+        f"<td>{escape(e.matched_term)}</td>"
+        f"<td>{conf}</td>"
+        f"<td>{escape(e.evidence) if e.evidence else '-'}</td>"
+        "</tr>"
+    )
+
+
+def _render_events_table(events: list[ActionEvent]) -> str:
+    rows = "".join(_render_event_row(e) for e in events)
+    return (
+        "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
+        "<th>Matched term</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody>"
+        + rows
+        + TBODY_TABLE
+    )
+
+
+def _render_events_timeline(events: list[ActionEvent], duration: float) -> str:
+    """The single `.bar-track` div for `write_html`'s timeline, or "" when
+    the video's duration is unknown (there's nothing to position bars
+    against)."""
+    if duration <= 0:
+        return ""
+    bars = "".join(
+        _render_timeline_bar(
+            e.start_seconds,
+            e.duration_seconds,
+            duration,
+            f"{escape(e.matched_term)} "
+            f"{_fmt_seconds(e.start_seconds)}-{_fmt_seconds(e.end_seconds)}",
+        )
+        for e in events
+    )
+    return f'<div class="bar-track">{bars}</div><p></p>'
+
+
 def write_html(report: ActionReport, video_name: str, path: Path) -> None:
     """Write a self-contained HTML oversight report (table + timeline) to `path`."""
     duration = report.video_duration_seconds or 0.0
@@ -145,45 +212,8 @@ def write_html(report: ActionReport, video_name: str, path: Path) -> None:
         )
         timeline_html = ""
     else:
-        rows = []
-        bars = []
-        for e in report.events:
-            conf = f"{e.confidence:.2f}" if e.confidence is not None else "n/a"
-            rows.append(
-                "<tr>"
-                f"<td>{_fmt_seconds(e.start_seconds)}</td>"
-                f"<td>{_fmt_seconds(e.end_seconds)}</td>"
-                f"<td>{escape(e.source)}</td>"
-                f"<td>{escape(e.matched_term)}</td>"
-                f"<td>{conf}</td>"
-                f"<td>{escape(e.evidence) if e.evidence else '-'}</td>"
-                "</tr>"
-            )
-            if duration > 0:
-                left_pct = max(0.0, min(100.0, (e.start_seconds / duration) * 100))
-                width_pct = max(
-                    0.5, min(100.0 - left_pct, (e.duration_seconds / duration) * 100)
-                )
-                bar_title = (
-                    f"{escape(e.matched_term)} "
-                    f"{_fmt_seconds(e.start_seconds)}-{_fmt_seconds(e.end_seconds)}"
-                )
-                bars.append(
-                    f'<div class="bar-fill" '
-                    f'style="left:{left_pct:.2f}%;width:{width_pct:.2f}%" '
-                    f'title="{bar_title}"></div>'
-                )
-        table_html = (
-            "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
-            "<th>Matched term</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody>"
-            + "".join(rows)
-            + "</tbody></table>"
-        )
-        timeline_html = (
-            f'<div class="bar-track">{"".join(bars)}</div><p></p>'
-            if duration > 0
-            else ""
-        )
+        table_html = _render_events_table(report.events)
+        timeline_html = _render_events_timeline(report.events, duration)
 
     html = _HTML_TEMPLATE.format(
         action=escape(report.action),
@@ -350,6 +380,108 @@ _ALL_ACTIONS_HTML_TEMPLATE = """<!doctype html>
 """
 
 
+def _group_actions_by_name(
+    actions: list[DetectedAction],
+) -> dict[str, list[DetectedAction]]:
+    """`actions` grouped by name, preserving each group's original relative
+    order -- used to build one timeline lane per distinct action without
+    re-scanning the full action list once per lane (an O(actions x
+    summaries) nested scan for a video with many distinct actions)."""
+    by_name: dict[str, list[DetectedAction]] = {}
+    for a in actions:
+        by_name.setdefault(a.name, []).append(a)
+    return by_name
+
+
+def _render_action_lane(
+    name: str,
+    occurrence_count: int,
+    actions: list[DetectedAction],
+    duration: float,
+) -> str:
+    """One timeline lane (label + bar track) for a single distinct action
+    name -- one row of write_html_all's "Timeline by action" section."""
+    bars = "".join(
+        _render_timeline_bar(
+            a.start_seconds,
+            a.duration_seconds,
+            duration,
+            f"{escape(a.name)} {_fmt_seconds(a.start_seconds)}-{_fmt_seconds(a.end_seconds)}",
+        )
+        for a in actions
+    )
+    return (
+        f'<div class="lane-label">{escape(name)} ({occurrence_count})</div>'
+        f'<div class="bar-track">{bars}</div>'
+    )
+
+
+def _render_all_actions_timeline(
+    summaries: list[ActionSummary], actions: list[DetectedAction], duration: float
+) -> str:
+    """One timeline lane per distinct action, in `summaries`' (first-
+    occurrence) order, or an explanatory line when the video's duration is
+    unknown (there's nothing to position lanes against)."""
+    if duration <= 0:
+        return "<p>Video duration unknown; timeline omitted.</p>"
+    by_name = _group_actions_by_name(actions)
+    return "".join(
+        _render_action_lane(
+            s.name, s.occurrence_count, by_name.get(s.name, []), duration
+        )
+        for s in summaries
+    )
+
+
+def _render_summary_row(s: ActionSummary) -> str:
+    conf = f"{s.max_confidence:.2f}" if s.max_confidence is not None else "n/a"
+    return (
+        "<tr>"
+        f"<td>{escape(s.name)}</td>"
+        f"<td>{escape(', '.join(sorted(s.sources)))}</td>"
+        f"<td>{s.occurrence_count}</td>"
+        f"<td>{_fmt_seconds(s.first_occurrence_seconds)}</td>"
+        f"<td>{_fmt_seconds(s.last_occurrence_seconds)}</td>"
+        f"<td>{_fmt_seconds(s.total_duration_seconds)}</td>"
+        f"<td>{conf}</td>"
+        "</tr>"
+    )
+
+
+def _render_summary_table(summaries: list[ActionSummary]) -> str:
+    rows = "".join(_render_summary_row(s) for s in summaries)
+    return (
+        "<table><thead><tr><th>Action</th><th>Source</th><th>Count</th>"
+        "<th>First</th><th>Last</th><th>Total time</th><th>Max conf.</th></tr></thead><tbody>"
+        + rows
+        + TBODY_TABLE
+    )
+
+
+def _render_action_log_row(a: DetectedAction) -> str:
+    conf = f"{a.confidence:.2f}" if a.confidence is not None else "n/a"
+    return (
+        "<tr>"
+        f"<td>{_fmt_seconds(a.start_seconds)}</td>"
+        f"<td>{_fmt_seconds(a.end_seconds)}</td>"
+        f"<td>{escape(a.source)}</td>"
+        f"<td>{escape(a.name)}</td>"
+        f"<td>{conf}</td>"
+        f"<td>{escape(a.evidence) if a.evidence else '-'}</td>"
+        "</tr>"
+    )
+
+
+def _render_action_log_table(actions: list[DetectedAction]) -> str:
+    rows = "".join(_render_action_log_row(a) for a in actions)
+    return (
+        "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
+        "<th>Action</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody>"
+        + rows
+        + TBODY_TABLE
+    )
+
+
 def write_html_all(report: AllActionsReport, video_name: str, path: Path) -> None:
     """Write a self-contained HTML report (per-action timeline lanes, a
     per-action summary table, and the full occurrence log) to `path`."""
@@ -374,84 +506,14 @@ def write_html_all(report: AllActionsReport, video_name: str, path: Path) -> Non
         return
 
     summaries = report.summaries
-
-    # One timeline lane per distinct action, in first-occurrence order.
-    lanes = []
-    for s in summaries:
-        bars = []
-        if duration > 0:
-            for a in report.actions:
-                if a.name != s.name:
-                    continue
-                left_pct = max(0.0, min(100.0, (a.start_seconds / duration) * 100))
-                width_pct = max(
-                    0.5, min(100.0 - left_pct, (a.duration_seconds / duration) * 100)
-                )
-                bar_title = f"{escape(a.name)} {_fmt_seconds(a.start_seconds)}-{_fmt_seconds(a.end_seconds)}"
-                bars.append(
-                    f'<div class="bar-fill" '
-                    f'style="left:{left_pct:.2f}%;width:{width_pct:.2f}%" '
-                    f'title="{bar_title}"></div>'
-                )
-        lanes.append(
-            f'<div class="lane-label">{escape(s.name)} ({s.occurrence_count})</div>'
-            f'<div class="bar-track">{"".join(bars)}</div>'
-        )
-    timeline_html = (
-        "".join(lanes)
-        if duration > 0
-        else "<p>Video duration unknown; timeline omitted.</p>"
-    )
-
-    summary_rows = []
-    for s in summaries:
-        conf = f"{s.max_confidence:.2f}" if s.max_confidence is not None else "n/a"
-        summary_rows.append(
-            "<tr>"
-            f"<td>{escape(s.name)}</td>"
-            f"<td>{escape(', '.join(sorted(s.sources)))}</td>"
-            f"<td>{s.occurrence_count}</td>"
-            f"<td>{_fmt_seconds(s.first_occurrence_seconds)}</td>"
-            f"<td>{_fmt_seconds(s.last_occurrence_seconds)}</td>"
-            f"<td>{_fmt_seconds(s.total_duration_seconds)}</td>"
-            f"<td>{conf}</td>"
-            "</tr>"
-        )
-    summary_table_html = (
-        "<table><thead><tr><th>Action</th><th>Source</th><th>Count</th>"
-        "<th>First</th><th>Last</th><th>Total time</th><th>Max conf.</th></tr></thead><tbody>"
-        + "".join(summary_rows)
-        + "</tbody></table>"
-    )
-
-    log_rows = []
-    for a in report.actions:
-        conf = f"{a.confidence:.2f}" if a.confidence is not None else "n/a"
-        log_rows.append(
-            "<tr>"
-            f"<td>{_fmt_seconds(a.start_seconds)}</td>"
-            f"<td>{_fmt_seconds(a.end_seconds)}</td>"
-            f"<td>{escape(a.source)}</td>"
-            f"<td>{escape(a.name)}</td>"
-            f"<td>{conf}</td>"
-            f"<td>{escape(a.evidence) if a.evidence else '-'}</td>"
-            "</tr>"
-        )
-    log_table_html = (
-        "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
-        "<th>Action</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody>"
-        + "".join(log_rows)
-        + "</tbody></table>"
-    )
-
     html = _ALL_ACTIONS_HTML_TEMPLATE.format(
         video_name=escape(video_name),
         duration=_fmt_seconds(report.video_duration_seconds),
         distinct_count=report.distinct_action_count,
         count=report.occurrence_count,
         people=report.distinct_people_tracked,
-        timeline=timeline_html,
-        summary_table=summary_table_html,
-        table=log_table_html,
+        timeline=_render_all_actions_timeline(summaries, report.actions, duration),
+        summary_table=_render_summary_table(summaries),
+        table=_render_action_log_table(report.actions),
     )
     path.write_text(html, encoding="utf-8")
