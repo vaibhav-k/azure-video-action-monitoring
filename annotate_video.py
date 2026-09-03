@@ -196,6 +196,107 @@ def _filter_only_composite(
     return [a for a in actions if a.source == "derived"]
 
 
+def _validate_args(args: argparse.Namespace) -> str | None:
+    """Return a human-readable error message if `args` fail validation
+    (beyond what argparse itself enforces), or None if they're all fine.
+    Kept separate from `main` so each check is one flat, easily-testable
+    statement rather than nested inside a long function body. Checking
+    `--report`'s existence here too (rather than only once its branch
+    actually runs) means a bad path fails fast, before any Azure/client
+    setup that might not even be needed."""
+    if not args.video and not args.video_id:
+        return (
+            "Either --video (to upload/read frames from) or --video-id (to "
+            "reuse an already-indexed video, downloading its source file for "
+            "frames) is required."
+        )
+    if args.video and not args.video.is_file():
+        return f"Video file not found: {args.video}"
+    if not (0.0 <= args.min_confidence <= 1.0):
+        return "--min-confidence must be between 0.0 and 1.0."
+    if args.report and not args.report.is_file():
+        return f"Report file not found: {args.report}"
+    return None
+
+
+def _acquire_actions(
+    client: VideoIndexerClient | None, args: argparse.Namespace
+) -> list[DetectedAction]:
+    """Get the actions to draw: from a saved --report (no Azure calls
+    needed at all), by reusing --video-id's insights, or by uploading
+    --video and waiting for processing. Raises
+    VideoIndexerError/VideoAnnotationError on failure; left for `main` to
+    turn into a clean exit code rather than a traceback."""
+    if args.report:
+        logger.info(
+            "Loading actions from %s (no Video Indexer insights call needed)",
+            args.report,
+        )
+        return _load_actions_from_report(args.report)
+
+    assert client is not None  # need_client is True whenever --report is absent
+    if args.video_id:
+        logger.info("Reusing existing video id=%s", args.video_id)
+        index = client.wait_for_processing(args.video_id)
+    else:
+        video_id = client.upload_video(args.video, name=args.name)
+        logger.info(
+            "Video uploaded (id=%s). Save this ID to re-run without "
+            "re-uploading via --video-id.",
+            video_id,
+        )
+        index = client.wait_for_processing(video_id)
+    return analyze_all(index).actions
+
+
+def _resolve_frame_source(
+    client: VideoIndexerClient | None, args: argparse.Namespace
+) -> Path:
+    """The video file to read frames from: the local --video if given,
+    otherwise --video-id's source file downloaded from Video Indexer.
+    Raises VideoIndexerError on a failed download."""
+    if args.video:
+        return args.video
+    assert client is not None  # need_client is True whenever --video is omitted
+    downloaded_path = args.out_dir / f"{args.video_id}.source.mp4"
+    return client.download_video(args.video_id, downloaded_path)
+
+
+def _build_client_if_needed(args: argparse.Namespace) -> VideoIndexerClient | None:
+    """Build a VideoIndexerClient when Azure has to do something: fetch/
+    build the insights (unless --report covers that) or download the
+    source file (unless a local --video covers that). Returns None when
+    nothing needs one (both covered), so `main` never pays for/validates
+    Azure config it won't use. Raises ConfigError if credentials aren't
+    configured; left for `main` to turn into a clean exit code."""
+    need_client = (not args.report) or (not args.video)
+    if not need_client:
+        return None
+    settings = Settings.from_env()
+    return VideoIndexerClient(settings)
+
+
+def _apply_only_composite_filter(
+    actions: list[DetectedAction], only_composite: bool
+) -> list[DetectedAction]:
+    """Apply --only-composite (keep just source=="derived" actions) and log
+    the outcome, including a warning if that leaves nothing to draw."""
+    if not only_composite:
+        return actions
+    filtered = _filter_only_composite(actions, only_composite=True)
+    logger.info(
+        "--only-composite: %d composite/derived action(s) to draw.", len(filtered)
+    )
+    if not filtered:
+        logger.warning(
+            "No composite actions found -- the overlay will be empty. "
+            "Composite actions only exist where a rule in COMPOSITE_ACTIONS "
+            "(src/constants.py) actually overlapped two detections; see "
+            "README 'Composite (derived) actions'."
+        )
+    return filtered
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     logging.basicConfig(
@@ -203,92 +304,35 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
 
-    if not args.video and not args.video_id:
-        logger.error(
-            "Either --video (to upload/read frames from) or --video-id (to "
-            "reuse an already-indexed video, downloading its source file for "
-            "frames) is required."
-        )
+    error = _validate_args(args)
+    if error:
+        logger.error(error)
         return 2
-
-    if args.video and not args.video.is_file():
-        logger.error("Video file not found: %s", args.video)
-        return 2
-
-    if not (0.0 <= args.min_confidence <= 1.0):
-        logger.error("--min-confidence must be between 0.0 and 1.0.")
-        return 2
-
-    # A client is needed whenever Azure has to do something: fetch/build the
-    # insights (unless --report covers that) or download the source file
-    # (unless a local --video covers that).
-    need_client = (not args.report) or (not args.video)
-    client: VideoIndexerClient | None = None
-    if need_client:
-        try:
-            settings = Settings.from_env()
-        except ConfigError as exc:
-            logger.error(str(exc))
-            return 2
-        client = VideoIndexerClient(settings)
 
     try:
-        if args.report:
-            if not args.report.is_file():
-                logger.error("Report file not found: %s", args.report)
-                return 2
-            logger.info(
-                "Loading actions from %s (no Video Indexer insights call needed)",
-                args.report,
-            )
-            actions = _load_actions_from_report(args.report)
-        elif args.video_id:
-            assert client is not None  # need_client is True on this branch
-            logger.info("Reusing existing video id=%s", args.video_id)
-            index = client.wait_for_processing(args.video_id)
-            actions = analyze_all(index).actions
-        else:
-            assert client is not None  # need_client is True on this branch
-            video_id = client.upload_video(args.video, name=args.name)
-            logger.info(
-                "Video uploaded (id=%s). Save this ID to re-run without "
-                "re-uploading via --video-id.",
-                video_id,
-            )
-            index = client.wait_for_processing(video_id)
-            actions = analyze_all(index).actions
+        client = _build_client_if_needed(args)
+    except ConfigError as exc:
+        logger.error(str(exc))
+        return 2
+
+    try:
+        actions = _acquire_actions(client, args)
     except (VideoIndexerError, VideoAnnotationError) as exc:
         logger.error("Could not obtain actions: %s", exc)
         return 1
 
-    if args.only_composite:
-        actions = _filter_only_composite(actions, only_composite=True)
-        logger.info(
-            "--only-composite: %d composite/derived action(s) to draw.", len(actions)
-        )
-        if not actions:
-            logger.warning(
-                "No composite actions found -- the overlay will be empty. "
-                "Composite actions only exist where a rule in COMPOSITE_ACTIONS "
-                "(src/constants.py) actually overlapped two detections; see "
-                "README 'Composite (derived) actions'."
-            )
+    actions = _apply_only_composite_filter(actions, args.only_composite)
 
     # Base name for default output filenames, and the frame source itself.
     base_name = args.video.stem if args.video else (args.name or args.video_id)
     if args.only_composite:
         base_name = f"{base_name}.composite_actions"
 
-    if args.video:
-        frame_source = args.video
-    else:
-        assert client is not None  # need_client is True whenever --video is omitted
-        downloaded_path = args.out_dir / f"{args.video_id}.source.mp4"
-        try:
-            frame_source = client.download_video(args.video_id, downloaded_path)
-        except VideoIndexerError as exc:
-            logger.error("Could not download source video for frames: %s", exc)
-            return 1
+    try:
+        frame_source = _resolve_frame_source(client, args)
+    except VideoIndexerError as exc:
+        logger.error("Could not download source video for frames: %s", exc)
+        return 1
 
     out_path = args.out or (args.out_dir / f"{base_name}.annotated.mp4")
 

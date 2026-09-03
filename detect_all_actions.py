@@ -23,6 +23,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 from src.action_analyzer import analyze_all
 from src.config import ConfigError, Settings
@@ -139,6 +140,88 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_args(args: argparse.Namespace) -> str | None:
+    """
+    Return a human-readable error message if `args` fail validation
+    (beyond what argparse itself enforces), or None if they're all fine.
+    Kept separate from `main` so each check is one flat, easily-testable
+    statement rather than nested inside a long function body.
+    """
+    if not args.video and not args.video_id:
+        return (
+            "Either --video (to upload) or --video-id (to reuse an already-"
+            "indexed video) is required, unless using --check-auth."
+        )
+    if args.video and not args.video.is_file():
+        return f"Video file not found: {args.video}"
+    if args.min_confidence is not None and not (0.0 <= args.min_confidence <= 1.0):
+        return "--min-confidence must be between 0.0 and 1.0."
+    if args.min_overlap_seconds < 0:
+        return "--min-overlap-seconds must be >= 0."
+    if args.merge_gap_seconds is not None and args.merge_gap_seconds < 0:
+        return "--merge-gap-seconds must be >= 0."
+    if args.min_temporal_iou is not None and not (0.0 <= args.min_temporal_iou <= 1.0):
+        return "--min-temporal-iou must be between 0.0 and 1.0."
+    return None
+
+
+def _run_check_auth(client: VideoIndexerClient, settings: Settings) -> int:
+    """
+    Handle `--check-auth`: verify Azure auth + account access, with no
+    upload, and return the process's exit code.
+
+    Args:
+        client: The video indexer client.
+        settings: The Azure account settings.
+    """
+    logger.info(
+        "Checking auth against subscription=%s resource_group=%s account_name=%s location=%s ...",
+        settings.subscription_id,
+        settings.resource_group,
+        settings.account_name,
+        settings.location,
+    )
+    try:
+        client.get_access_token()
+    except VideoIndexerError as exc:
+        logger.error(exc)
+        return 1
+    logger.info(
+        "Success: obtained a Video Indexer access token. Config and permissions look good."
+    )
+    return 0
+
+
+def _acquire_index(
+    client: VideoIndexerClient, args: argparse.Namespace
+) -> dict[str, Any]:
+    """
+    Get the video's Video Indexer insights index -- either by reusing
+    `--video-id` as-is, or by uploading `--video` and waiting for
+    processing. Raises `VideoIndexerError` on failure; left for `main` to
+    turn into a clean exit code rather than a traceback.
+
+    Args:
+        client: The video indexer client.
+        args: The parsed command line arguments.
+    """
+    if args.video_id:
+        logger.info("Reusing existing video id=%s", args.video_id)
+        return client.wait_for_processing(args.video_id)
+
+    video_id = client.upload_video(
+        args.video,
+        name=args.name,
+        indexing_preset=args.indexing_preset or "Default",
+    )
+    logger.info(
+        "Video uploaded (id=%s). Save this ID to re-run analysis "
+        "without re-uploading via --video-id.",
+        video_id,
+    )
+    return client.wait_for_processing(video_id)
+
+
 def main(argv: list[str] | None = None) -> int:
     """
     Main entry point for the CLI.
@@ -164,48 +247,11 @@ def main(argv: list[str] | None = None) -> int:
     client = VideoIndexerClient(settings)
 
     if args.check_auth:
-        logger.info(
-            "Checking auth against subscription=%s resource_group=%s account_name=%s location=%s ...",
-            settings.subscription_id,
-            settings.resource_group,
-            settings.account_name,
-            settings.location,
-        )
-        try:
-            client.get_access_token()
-        except VideoIndexerError as exc:
-            logger.error(exc)
-            return 1
-        logger.info(
-            "Success: obtained a Video Indexer access token. Config and permissions look good."
-        )
-        return 0
+        return _run_check_auth(client, settings)
 
-    if not args.video and not args.video_id:
-        logger.error(
-            "Either --video (to upload) or --video-id (to reuse an already-"
-            "indexed video) is required, unless using --check-auth."
-        )
-        return 2
-
-    if args.video and not args.video.is_file():
-        logger.error("Video file not found: %s", args.video)
-        return 2
-
-    if args.min_confidence is not None and not (0.0 <= args.min_confidence <= 1.0):
-        logger.error("--min-confidence must be between 0.0 and 1.0.")
-        return 2
-
-    if args.min_overlap_seconds < 0:
-        logger.error("--min-overlap-seconds must be >= 0.")
-        return 2
-
-    if args.merge_gap_seconds is not None and args.merge_gap_seconds < 0:
-        logger.error("--merge-gap-seconds must be >= 0.")
-        return 2
-
-    if args.min_temporal_iou is not None and not (0.0 <= args.min_temporal_iou <= 1.0):
-        logger.error("--min-temporal-iou must be between 0.0 and 1.0.")
+    error = _validate_args(args)
+    if error:
+        logger.error(error)
         return 2
 
     # Base name used for both the Video Indexer upload label and the output
@@ -218,21 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        if args.video_id:
-            logger.info("Reusing existing video id=%s", args.video_id)
-            index = client.wait_for_processing(args.video_id)
-        else:
-            video_id = client.upload_video(
-                args.video,
-                name=args.name,
-                indexing_preset=args.indexing_preset or "Default",
-            )
-            logger.info(
-                "Video uploaded (id=%s). Save this ID to re-run analysis "
-                "without re-uploading via --video-id.",
-                video_id,
-            )
-            index = client.wait_for_processing(video_id)
+        index = _acquire_index(client, args)
     except VideoIndexerError as exc:
         logger.error("Video Indexer processing failed: %s", exc)
         return 1
