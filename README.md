@@ -185,6 +185,9 @@ Useful flags:
   phone"` or `"handling cash"`, drop matches whose underlying overlap is
   shorter than this — see [Composite (derived)
   actions](#composite-derived-actions).
+- `--merge-gap-seconds <n>` / `--min-temporal-iou <0.0-1.0>` /
+  `--require-single-person` — further composite tuning, see [Composite
+  (derived) actions](#composite-derived-actions).
 - `--check-auth` — verify Azure auth + account access only, no upload.
 - `-v` — verbose/debug logging.
 
@@ -221,9 +224,10 @@ Extra flags:
   below this threshold. Occurrences with no confidence value (some insight
   buckets don't score every item) are always kept.
 - `--indexing-preset <preset>` — see below.
-- `--min-overlap-seconds <n>` / `--merge-gap-seconds <n>` — tune composite
-  (derived) actions like "person using phone" — see [Composite (derived)
-  actions](#composite-derived-actions) below.
+- `--min-overlap-seconds <n>` / `--merge-gap-seconds <n>` /
+  `--min-temporal-iou <0.0-1.0>` / `--require-single-person` — tune
+  composite (derived) actions like "person using phone" — see [Composite
+  (derived) actions](#composite-derived-actions) below.
 
 Same caveat as above applies here too: this reports whatever Video Indexer's
 default model tagged in `labels`/`keywords`/`detectedObjects`/`ocr` — it is
@@ -312,18 +316,35 @@ Current composites, defined in `COMPOSITE_ACTIONS` (`src/constants.py`):
 | Derived action | Left | Right | Caveat |
 | --- | --- | --- | --- |
 | `person using phone` | person-like label | `cell phone` object | Overlap is circumstantial: they could be nearby without the phone being touched. |
-| `person driving car` | person-like label | `car`/`outdoor vehicle`/`vehicle` object | Same circumstantial caveat — a person and a car in frame together isn't proof the person is driving it (could be a pedestrian, passenger, or bystander). |
-| `person playing sports` | person-like label | `sports equipment`/`athletic game`/`ball`/`bat`/`racket` object | Same caveat, generalized further — any of these objects near a person matches, not necessarily one they're actively using. |
-| `person handling cash` | person-like label | OCR text matching `DEFAULT_SYNONYMS["cash"]` | Only fires when currency text is both in frame and legible (see OCR caveats above) — misses cash that's present but unreadable. |
-| `person at register` | person-like label | `keyboard`/`laptop`/`computer`/`monitor`/`tv` object | Weakest of the five — Video Indexer has no "cash register"/"POS terminal" class, so this leans on the closest generic object classes available. A person near any keyboard or screen matches, not specifically one behind a checkout counter. |
+| `person driving car` | person-like label | `car` object | Same circumstantial caveat — a person and a car in frame together isn't proof the person is driving it (could be a pedestrian, passenger, or bystander). Scoped to `car` only: Video Indexer's other vehicle classes (`bicycle`, `motorcycle`, `bus`, `boat`, `train`, `airplane`) exist but aren't what "driving car" claims, so they're deliberately left out rather than guessed in. |
+| `person playing sports` | person-like label | `sports ball`/`tennis racket`/`baseball glove`/`skis`/`snowboard`/`skateboard`/`surfboard`/`frisbee`/`kite` object, or a label/keyword containing `sports equipment`/`athletic game`/`ball`/`bat`/`racket` | Same circumstantial caveat, generalized further — any of these objects near a person matches, not necessarily one they're actively using. |
+| `person handling cash` | person-like label | OCR text matching `DEFAULT_SYNONYMS["cash"]` | Only fires when currency text is both in frame and legible (see OCR caveats above) — misses cash that's present but unreadable. Some synonyms (`"united states of america"`, `"federal reserve"`) can also match non-currency printed text (documents, signage), so treat hits as a manual-review prompt, not confirmation. |
+| `person at register` | person-like label | `keyboard`/`laptop`/`computer mouse` object, or a label/keyword containing `computer`/`monitor`/`television`/`tv` | One of the weaker composites here — Video Indexer has no "cash register"/"POS terminal" class, so this leans on the closest generic object classes available. A person near any keyboard or screen matches — an office desk or a living-room TV fires this just as readily as an actual checkout counter. |
+| `person carrying bag` | person-like label | `backpack`/`handbag`/`suitcase` object | Useful for loss-prevention framing or customer-flow tracking, but can't tell whether the bag came from the store or was already theirs — a hit is "worth a look," not a shoplifting claim. |
+| `person reading` | person-like label | `book` object | Pairs thematically with `person using phone` as an "employee distraction" signal, but a hit is just as likely to be a customer reading a product label or a book they're buying. |
+| `person near knife or scissors` | person-like label | `knife`/`scissors` object | Deliberately named neutrally, not as a weapon/safety alert: a hit is at least as likely to be inventory being scanned (kitchenware for sale, a box cutter opening a delivery) as anything actually held. Heaviest false-positive risk of any composite here — review, never auto-escalate. |
 
-`COMPOSITE_ACTIONS` entries reference a `CompositeSide`, which matches
-either exact detected names (`names={"cell phone"}`) or a synonym family
-by substring, same as `DEFAULT_SYNONYMS` (`synonyms=(...)`) — the latter is
-what makes `person handling cash` possible at all, since OCR text varies
-per banknote and no fixed set of exact strings could cover it. Add a new
-row to extend detection to another person+object overlap without touching
-the derivation logic itself.
+The exact object names above (`cell phone`, `car`, `sports ball`, `tennis
+racket`, `baseball glove`, `skis`, `snowboard`, `skateboard`, `surfboard`,
+`frisbee`, `kite`, `keyboard`, `laptop`, `computer mouse`, `backpack`,
+`handbag`, `suitcase`, `book`, `knife`, `scissors`) are Video Indexer's
+actual fixed 80-class `detectedObjects` vocabulary (see [object detection
+insight](https://learn.microsoft.com/en-us/azure/azure-video-indexer/object-detection-insight)),
+matched exactly since that's the literal string it returns — confirmed
+against both that doc and this project's own `--save-raw-insights`
+captures. Everything else in the "Right" column (`sports equipment`,
+`athletic game`, `ball`, `bat`, `racket`, `computer`, `monitor`,
+`television`, `tv`) is *not* in that fixed list — it's a substring guess
+against the separate, much larger `labels`/`keywords` tagging vocabulary,
+unverified against real captures. `COMPOSITE_ACTIONS` entries reference a
+`CompositeSide`, which matches either exact names this way (`names={"cell
+phone"}`) or a substring synonym family the same way `DEFAULT_SYNONYMS`
+does (`synonyms=(...)`) — this is also what makes `person handling cash`
+possible at all, since OCR text varies per banknote and no fixed set of
+exact strings could cover it. Add a new row to extend detection to another
+person+object overlap without touching the derivation logic itself, and
+double-check any new exact `names` against the real class list above
+before assuming they'll match `detectedObjects`.
 
 Verified against a real ~28s clip of a person standing and using their
 phone (`detect_all_actions.py --video-id f9m21irr9l`):
@@ -349,12 +370,17 @@ occurrence) was filtered out. That flag and its companion:
   a derived overlap shorter than this many seconds. Defaults to `0.15`;
   pass `0` to see every overlap Video Indexer's raw timestamps produce,
   jitter included.
-- `--merge-gap-seconds <n>` (`detect_all_actions.py` only) — off by
+- `--merge-gap-seconds <n>` (`detect_all_actions.py` / `main.py`) — off by
   default. When set, collapses occurrences of the *same* action within
   that many seconds of each other (or overlapping) into one combined
   occurrence — useful once you're past debugging and just want "the
   cashier picked up their phone 3 separate times" rather than a wall of
-  near-duplicate rows from Video Indexer's frame-level fragmentation.
+  near-duplicate rows. This matters more than it might sound for composite
+  actions specifically: `_derive_composite_actions` pairs *every*
+  overlapping left/right instance, so if Video Indexer tags a person with
+  two adjacent, slightly-overlapping label spans (e.g. both `person` and
+  `man`), each pairs separately with the same object and produces its own
+  near-duplicate derived row unless you merge them.
 
 **Honest limitation: this can't tell *which* person is which.** A derived
 `person using phone` (or `person at register`) means *some* detected person
@@ -363,17 +389,83 @@ person. If more than one person is ever in frame (e.g. a cashier *and* a
 customer), nothing here can currently attribute the action to one over the
 other. This isn't a gap in this project's code: Video Indexer's own
 documented schemas for [observed
-people](https://learn.microsoft.com/en-us/azure/azure-video-indexer/observed-matched-people-insight)
-and [faces](https://learn.microsoft.com/en-us/azure/azure-video-indexer/face-detection-insight)
-carry only start/end timestamps, no bounding-box or other spatial
+people](https://learn.microsoft.com/en-us/azure/azure-video-indexer/observed-matched-people-insight),
+[observed people
+tracking](https://learn.microsoft.com/en-us/azure/azure-video-indexer/observed-people-tracking)
+(the Advanced-preset feature that's the closest thing to a "spatial" API
+surface here), and [faces](https://learn.microsoft.com/en-us/azure/azure-video-indexer/face-detection-insight)
+all carry only start/end timestamps, no bounding-box or other spatial
 coordinates — confirmed both against those docs and against this project's
-own `--save-raw-insights` captures. If distinguishing roles ever becomes a
-requirement, the honest options are: check whether a different Video
-Indexer tier or API surface exposes spatial data before building around
-it, or add a separate, local computer-vision pass (e.g. a lightweight
-person tracker establishing a fixed "counter region") as a second insights
+own `--save-raw-insights` captures, including under the Advanced preset. If
+distinguishing roles ever becomes a requirement, the honest options are:
+check whether a different Video Indexer tier or API surface (beyond the
+three checked above) exposes spatial data before building around it, or
+add a separate, local computer-vision pass (e.g. a lightweight person
+tracker establishing a fixed "counter region") as a second insights
 source alongside `video_indexer_client.py` — real additional engineering,
 not a config flag.
+
+**One narrow exception does exist: an OCR-box overlay filter.** `ocr` is
+the only bucket with *any* spatial field — a static `left`/`top`/`width`/
+`height` box per OCR item (not tracked per-instance). That's nowhere near
+enough to gate person-vs-object proximity (the person side still has no
+box), but it is enough to catch one concrete false-positive source: a
+burned-in overlay — a camera timestamp, a watermark — sitting in a fixed
+corner/edge region, small relative to the frame. `person handling cash`
+now excludes OCR text that looks like this (`_looks_like_ocr_overlay` in
+`action_analyzer.py`, thresholds in `constants.py`), using the video's
+pixel dimensions when the payload has them. This is verified against a
+real example already in this repo: `cashier.raw_insights.json` is a
+security-camera clip with a running on-screen clock (`17 14 07`, `17 14
+14`, ...) sitting near a top corner of its 320×240 frame — exactly the
+overlay shape this heuristic targets, though that particular text never
+matched `DEFAULT_SYNONYMS["cash"]` to begin with. It's still just a pixel
+heuristic (fixed thresholds, not currently CLI-configurable) and never
+hides the raw OCR row itself from a report — only ever excludes it as
+composite evidence.
+
+**Exhaustively re-checked, not just re-read: no coordinates exist anywhere
+else.** Before adding the two filters below, every raw capture in
+`output/*.raw_insights.json` was walked key-by-key, recursively, at every
+nesting level — not just the top-level item shape already documented above
+— specifically looking for anything coordinate-shaped. Nothing turned up
+beyond the OCR box already in use: `detectedObjects`/`labels`/`keywords`
+instances carry only timestamps and confidence; `observedPeople` instances
+carry only timestamps; `shots[].keyFrames` and `faces[].thumbnails` carry
+only timestamps plus a `thumbnailId`/`fileName` pointing at an actual
+generated image, not a coordinate. Fetching those thumbnail images and
+running a local object/person detector on them would be a real way to get
+genuine bounding boxes — that's the "separate, local computer-vision pass"
+option above, not something this project does today.
+
+Two further opt-in filters get closer to spatial gating's *effect*
+(fewer spurious composites, less "which person" ambiguity) without
+pretending to have coordinates that don't exist:
+
+- `--min-temporal-iou <0.0-1.0>` (`detect_all_actions.py` / `main.py`) —
+  drop a composite whose temporal Intersection-over-Union is below this.
+  IoU is the standard measure of how well two *spatial* boxes align
+  (overlap area / union area); here it's computed on *time* instead
+  (overlap duration / combined duration), since duration is the one
+  dimension every bucket actually has numbers for. A person label spanning
+  the whole video and an object appearing once for a second can still
+  clear `--min-overlap-seconds`, but their durations barely coincide — a
+  low temporal IoU. This is explicitly a time-domain proxy, not a spatial
+  measurement, and it can suppress a real momentary event just because it
+  was brief relative to a long-lived person label — off by default.
+- `--require-single-person` (`detect_all_actions.py` / `main.py`) — needs
+  `observedPeople` data (`--indexing-preset Advanced`). Every derived
+  action's evidence now records how many distinct people
+  (`observedPeople`) were tracked as present during its overlap window,
+  whenever that data exists at all (e.g. `"person (labels) + cell phone
+  (objects) -- 1 person(s) in frame"`) — this doesn't say *which* person,
+  there's still no position data, but when the count is exactly 1 there's
+  no ambiguity left to resolve for that specific occurrence either.
+  `--require-single-person` keeps only those unambiguous occurrences,
+  dropping ones where 0 or 2+ people were tracked. It resolves nothing
+  about the ambiguous cashier-and-customer moments — it just doesn't
+  report them as if they were resolved. Silently a no-op on a
+  Default-preset video (no `observedPeople` data to check against).
 
 ## Saving an annotated video
 
@@ -476,8 +568,9 @@ python annotate_video.py --video input/your_video.mp4 --report output/your_video
 
 `--action` takes the composite's name (or any distinctive substring of
 it) — swap `"using phone"` for `"driving car"`, `"playing sports"`,
-`"handling cash"`, or `"at register"` for the other composites currently
-defined in `COMPOSITE_ACTIONS` (`src/constants.py`). If you haven't run
+`"handling cash"`, `"at register"`, `"carrying bag"`, `"reading"`, or
+`"knife or scissors"` for the other composites currently defined in
+`COMPOSITE_ACTIONS` (`src/constants.py`). If you haven't run
 Recipe A first and don't have a video ID yet, drop `--video-id` from the
 `main.py` command — it'll upload the video itself instead (one Azure
 upload either way, just on whichever command runs first).

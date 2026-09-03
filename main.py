@@ -89,6 +89,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "Pass 0 to keep every overlap regardless of length.",
     )
     parser.add_argument(
+        "--merge-gap-seconds",
+        type=float,
+        default=None,
+        help="Merge occurrences of this action within this many seconds of "
+        "each other (or overlapping) into one combined occurrence. Off by "
+        "default (every occurrence reported separately); try e.g. 1.0 to "
+        "collapse fragmented/duplicate detections -- especially useful for "
+        'a composite/derived action (e.g. --action "using phone"), which '
+        "can otherwise report several overlapping near-duplicate rows.",
+    )
+    parser.add_argument(
+        "--min-temporal-iou",
+        type=float,
+        default=None,
+        help="Drop a composite/derived match whose temporal "
+        "Intersection-over-Union (overlap duration / combined duration of "
+        "the two contributing detections) is below this (0.0-1.0). A time-"
+        "domain proxy for 'these detections' durations line up closely', "
+        "not spatial evidence -- see README 'Composite (derived) actions'. "
+        "Off by default.",
+    )
+    parser.add_argument(
+        "--require-single-person",
+        action="store_true",
+        help="Only keep a composite/derived match from a moment where "
+        "exactly one person was tracked in frame (needs 'observedPeople' "
+        "data, i.e. an --indexing-preset Advanced video) -- drops "
+        "occurrences with 0 or 2+ people tracked, since those remain "
+        "genuinely ambiguous about which person the action belongs to. "
+        "Off by default; silently has no effect if observedPeople data "
+        "isn't available.",
+    )
+    parser.add_argument(
         "--save-raw-insights",
         action="store_true",
         help="Also save the full raw Video Indexer insights JSON.",
@@ -147,6 +180,14 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("--min-overlap-seconds must be >= 0.")
         return 2
 
+    if args.merge_gap_seconds is not None and args.merge_gap_seconds < 0:
+        logger.error("--merge-gap-seconds must be >= 0.")
+        return 2
+
+    if args.min_temporal_iou is not None and not (0.0 <= args.min_temporal_iou <= 1.0):
+        logger.error("--min-temporal-iou must be between 0.0 and 1.0.")
+        return 2
+
     # Base name used for both the Video Indexer upload label and the output
     # filenames. Prefer the local video's filename; fall back to --name or
     # the video ID when running against an already-indexed video with no
@@ -186,6 +227,9 @@ def main(argv: list[str] | None = None) -> int:
         action=args.action,
         extra_synonyms=args.synonym,
         min_overlap_seconds=args.min_overlap_seconds,
+        merge_gap_seconds=args.merge_gap_seconds,
+        min_temporal_iou=args.min_temporal_iou,
+        require_single_person=args.require_single_person,
     )
 
     print()

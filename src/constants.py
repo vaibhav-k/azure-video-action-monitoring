@@ -93,6 +93,17 @@ class CompositeAction:
 
 _PERSON_LIKE = CompositeSide(names=frozenset({"person", "man", "woman", "people"}))
 
+# `names` below are drawn from Video Indexer's actual fixed 80-class
+# `detectedObjects` vocabulary (confirmed against Microsoft's own docs --
+# https://learn.microsoft.com/en-us/azure/azure-video-indexer/object-detection-insight
+# -- and cross-checked against this project's own raw insight captures in
+# output/*.raw_insights.json), matched *exactly* (case-insensitively) since
+# that's the literal `displayName` string Video Indexer returns. `synonyms`
+# are substring guesses against the separate, much larger and *unfixed*
+# labels/keywords tagging vocabulary -- unverified against real captures,
+# so kept as substrings rather than exact names (partly so a fragment like
+# "ball" or "racket" still catches a real class name that contains it, e.g.
+# "sports ball" / "tennis racket", without having to hardcode every one).
 # Add more entries here for other person+object (or object+object) overlaps
 # without touching the derivation logic in action_analyzer.py at all.
 COMPOSITE_ACTIONS: list[CompositeAction] = [
@@ -104,15 +115,30 @@ COMPOSITE_ACTIONS: list[CompositeAction] = [
     CompositeAction(
         name="person driving car",
         left=_PERSON_LIKE,
-        right=CompositeSide(names=frozenset({"car", "outdoor vehicle", "vehicle"})),
+        # "car" is the only real detectedObjects class that fits "driving" --
+        # the vocabulary's other vehicle classes (bicycle, motorcycle, bus,
+        # boat, train, airplane) aren't what this composite's name claims,
+        # so they're deliberately left out rather than guessed in.
+        right=CompositeSide(names=frozenset({"car"})),
     ),
     CompositeAction(
         name="person playing sports",
         left=_PERSON_LIKE,
         right=CompositeSide(
             names=frozenset(
-                {"sports equipment", "athletic game", "ball", "bat", "racket"}
-            )
+                {
+                    "sports ball",
+                    "tennis racket",
+                    "baseball glove",
+                    "skis",
+                    "snowboard",
+                    "skateboard",
+                    "surfboard",
+                    "frisbee",
+                    "kite",
+                }
+            ),
+            synonyms=("sports equipment", "athletic game", "ball", "bat", "racket"),
         ),
     ),
     CompositeAction(
@@ -132,48 +158,44 @@ COMPOSITE_ACTIONS: list[CompositeAction] = [
         # terminal" class, so this leans on the closest generic classes
         # actually available. Weakest-evidence composite in this list --
         # "a person near any keyboard/screen" is a much looser claim than
-        # "a person near a cell phone".
+        # "a person near a cell phone", and it will fire in plenty of
+        # non-checkout scenes (an office desk, a living room TV) too.
         right=CompositeSide(
-            names=frozenset({"keyboard", "laptop", "computer", "monitor", "tv"})
+            names=frozenset({"keyboard", "laptop", "computer mouse"}),
+            synonyms=("computer", "monitor", "television", "tv"),
         ),
     ),
     CompositeAction(
-        name="person dining",
+        name="person carrying bag",
         left=_PERSON_LIKE,
-        # Strong proxy for an active meal, cafe setting, or dining room insight.
-        # Combines tableware and common food categories to isolate eating/serving.
-        right=CompositeSide(
-            names=frozenset(
-                {
-                    "fork",
-                    "knife",
-                    "spoon",
-                    "bowl",
-                    "cup",
-                    "wine glass",
-                    "bottle",
-                    "sandwich",
-                    "pizza",
-                    "donut",
-                    "cake",
-                    "orange",
-                    "apple",
-                    "banana",
-                }
-            )
-        ),
+        # backpack/handbag/suitcase are all real detectedObjects classes.
+        # Useful for loss-prevention framing (leaving with an unscanned
+        # item) or just customer-flow tracking -- but this can't tell
+        # whether the bag came from the store or was already theirs, so
+        # treat a hit as "worth a look," not a shoplifting claim.
+        right=CompositeSide(names=frozenset({"backpack", "handbag", "suitcase"})),
     ),
     CompositeAction(
-        name="person traveling",
+        name="person reading",
         left=_PERSON_LIKE,
-        # Isolates typical travel, airport, or hotel check-in behaviors.
-        right=CompositeSide(names=frozenset({"suitcase", "backpack", "handbag"})),
+        # "book" is a real detectedObjects class. Pairs thematically with
+        # `person using phone` as an "employee distraction" signal, but a
+        # hit is just as likely to be a customer reading a product label
+        # or a book they're buying.
+        right=CompositeSide(names=frozenset({"book"})),
     ),
     CompositeAction(
-        name="person interacting with pet",
+        name="person near knife or scissors",
         left=_PERSON_LIKE,
-        # Flags interactions with domestic animals typically found indoors or on walks.
-        right=CompositeSide(names=frozenset({"cat", "dog"})),
+        # knife/scissors are real detectedObjects classes. Deliberately
+        # named neutrally rather than as a "weapon" or safety alert: a hit
+        # here is at least as likely to be inventory being scanned
+        # (kitchenware for sale, a box cutter opening a delivery) as
+        # anything actually held or brandished, and this project has no
+        # way to tell the difference. Heaviest false-positive risk of any
+        # composite in this list -- review before acting on it, never
+        # auto-escalate.
+        right=CompositeSide(names=frozenset({"knife", "scissors"})),
     ),
 ]
 
@@ -183,6 +205,22 @@ COMPOSITE_ACTIONS: list[CompositeAction] = [
 # default to this constant; direct library/test callers see every overlap
 # unless they ask for filtering).
 DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS = 0.15
+
+# Heuristic thresholds for recognizing a burned-in overlay (a camera
+# timestamp, watermark, station bug) in `ocr`'s one spatial field -- a
+# static left/top/width/height box per OCR item (not tracked per-instance).
+# Used only to gate the `person handling cash` composite in
+# `_derive_composite_actions` (never to hide raw OCR rows): an OCR item is
+# treated as a likely overlay, and excluded as composite evidence, when its
+# box is both small relative to the frame and sitting within a margin of an
+# edge -- e.g. a security-camera clock reading "17 14 07" near a top
+# corner, as literally captured in this project's own
+# `cashier.raw_insights.json`. This can only run when the video's
+# width/height are present in the insights payload (see
+# `_video_dimensions`); it's a pixel heuristic, not a guarantee, and always
+# on -- not currently CLI-configurable.
+DEFAULT_OCR_OVERLAY_EDGE_MARGIN_FRACTION = 0.2
+DEFAULT_OCR_OVERLAY_MAX_AREA_FRACTION = 0.05
 
 # Video annotation and overlay settings.
 DEFAULT_MIN_CONFIDENCE = 0.5

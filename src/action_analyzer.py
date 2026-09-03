@@ -64,15 +64,67 @@ so nothing here can distinguish *which* person is which (e.g. "the
 cashier" vs. a customer walking past) when more than one is in frame. A
 derived "person X" action means *some* detected person overlapped the
 other evidence, not a specific, identified one.
+
+`ocr` is the one exception with *any* spatial field at all: each OCR item
+carries a single static `left`/`top`/`width`/`height` box (not tracked
+per-instance -- if the same text is read again later at a different
+on-screen position, the box isn't updated). That's nowhere near enough to
+gate person-vs-object proximity (the person side still has no box to
+compare against), but it is enough to catch one concrete false-positive
+source: a burned-in overlay -- a camera timestamp, a watermark -- sitting
+in a fixed corner/edge region, small relative to the frame.
+`_looks_like_ocr_overlay` applies that heuristic (thresholds in
+`constants.py`) to exclude such OCR items from `person handling cash`
+specifically, using the video's width/height when the payload has them
+(`_video_dimensions`); it never removes or hides them from the raw
+`ocr`-source rows elsewhere in a report. This is still just a pixel
+heuristic on one item's static box, not a guarantee.
+
+Two more opt-in filters simulate a *little* of what real spatial gating
+would give, without pretending to have coordinates that don't exist --
+both were checked exhaustively (every instance-level field across this
+project's own raw captures, not just the top-level items) and confirmed
+absent before building either of these:
+
+1. `min_temporal_iou` is a temporal analog of spatial IoU (Intersection-
+   over-Union, the standard measure of how well two bounding boxes align)
+   applied to *time* instead of space: `overlap_duration / union_duration`
+   for the two contributing items. A person label spanning the whole video
+   and an object appearing for one brief instant can still pass
+   `min_overlap_seconds`, but their durations barely coincide -- a low
+   temporal IoU. Requiring a higher IoU favors composites where both
+   detections' durations line up closely, which is a better (still
+   circumstantial) proxy for "these describe the same real event" than
+   "any overlap of at least N seconds." This is explicitly a *time*-domain
+   proxy, not spatial evidence.
+2. `require_single_person` uses `observedPeople` (Advanced-preset only) to
+   count how many distinct people were tracked as present during a
+   composite's overlap window (`_people_in_frame_count`). This never says
+   *which* person -- there's still no position data -- but when exactly
+   one person was present, there's no "which person" ambiguity for that
+   specific occurrence either, so it's meaningful to keep. Every derived
+   action's `evidence` records this count (e.g. "1 person in frame") when
+   `observedPeople` data is available at all; `require_single_person`
+   additionally drops any occurrence where the count is 0, 2, or more --
+   i.e., keeps only occurrences that happen not to be ambiguous, rather
+   than resolving the ambiguous ones.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from itertools import product
 from typing import Any, cast
 
-from src.constants import COMPOSITE_ACTIONS, DEFAULT_SYNONYMS, CompositeAction
+from src.constants import (
+    COMPOSITE_ACTIONS,
+    DEFAULT_OCR_OVERLAY_EDGE_MARGIN_FRACTION,
+    DEFAULT_OCR_OVERLAY_MAX_AREA_FRACTION,
+    DEFAULT_SYNONYMS,
+    CompositeAction,
+    CompositeSide,
+)
 
 
 @dataclass
@@ -193,6 +245,73 @@ def _item_name(item: dict[str, Any]) -> str:
     )
 
 
+def _item_ocr_box(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """Resolve an `ocr` item's static (left, top, width, height) pixel box,
+    if all four are present and numeric. This is one box per OCR item, not
+    per-instance -- see module docstring. Returns None for any other bucket
+    (labels/keywords/detectedObjects items never have these keys)."""
+    left, top, width, height = (
+        item.get("left"),
+        item.get("top"),
+        item.get("width"),
+        item.get("height"),
+    )
+    if all(isinstance(v, (int, float)) for v in (left, top, width, height)):
+        return float(left), float(top), float(width), float(height)  # type: ignore[return-value]
+    return None
+
+
+def _video_dimensions(index_payload: dict[str, Any]) -> tuple[float, float] | None:
+    """Best-effort extraction of the source video's frame width/height in
+    pixels (Video Indexer reports these on the video object itself, e.g.
+    `videos[0].width`/`height`, not inside `insights` -- confirmed against
+    this project's own raw insights captures). Used only to interpret
+    `ocr`'s static per-item box in `_looks_like_ocr_overlay`; returns None
+    (which disables that heuristic entirely) if either dimension is
+    missing, non-numeric, or non-positive."""
+    videos = index_payload.get("videos")
+    source: dict[str, Any] = index_payload
+    if isinstance(videos, list) and videos:
+        source = cast("dict[str, Any]", videos[0])
+    width, height = source.get("width"), source.get("height")
+    if (
+        isinstance(width, (int, float))
+        and isinstance(height, (int, float))
+        and width > 0
+        and height > 0
+    ):
+        return float(width), float(height)
+    return None
+
+
+def _looks_like_ocr_overlay(
+    ocr_box: tuple[float, float, float, float] | None,
+    frame_width: float | None,
+    frame_height: float | None,
+    edge_margin_fraction: float = DEFAULT_OCR_OVERLAY_EDGE_MARGIN_FRACTION,
+    max_area_fraction: float = DEFAULT_OCR_OVERLAY_MAX_AREA_FRACTION,
+) -> bool:
+    """Heuristic: does this OCR item's static box look like a burned-in
+    overlay (a camera timestamp, a watermark) rather than real in-scene
+    text? True only when both the box and the frame's dimensions are known,
+    the box is small relative to the frame, AND it sits within
+    `edge_margin_fraction` of at least one edge -- e.g. a security-camera
+    clock reading "17 14 07" near a top corner, as literally captured in
+    this project's own cashier.raw_insights.json. A pixel heuristic on one
+    item's static box, not a guarantee; used only to gate the
+    `person handling cash` composite, never to hide raw OCR rows."""
+    if ocr_box is None or not frame_width or not frame_height:
+        return False
+    left, top, width, height = ocr_box
+    if (width * height) / (frame_width * frame_height) > max_area_fraction:
+        return False
+    near_left = left <= frame_width * edge_margin_fraction
+    near_right = (left + width) >= frame_width * (1 - edge_margin_fraction)
+    near_top = top <= frame_height * edge_margin_fraction
+    near_bottom = (top + height) >= frame_height * (1 - edge_margin_fraction)
+    return near_left or near_right or near_top or near_bottom
+
+
 def _iter_valid_instances(
     item: dict[str, Any],
 ) -> Iterator[tuple[float, float, float | None]]:
@@ -252,6 +371,10 @@ class DetectedAction:
     end_seconds: float
     confidence: float | None
     evidence: str | None = None  # for source="derived": the two items that overlapped
+    # for source="ocr": that item's static (left, top, width, height) pixel
+    # box, if present -- used only by `_looks_like_ocr_overlay` to spot a
+    # likely burned-in overlay; never surfaced in reports.
+    ocr_box: tuple[float, float, float, float] | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -331,6 +454,7 @@ def _all_events_from_bucket(bucket: Any, source: str) -> list[DetectedAction]:
         name = _item_name(item)
         if not name:
             continue
+        ocr_box = _item_ocr_box(item) if source == "ocr" else None
         events.extend(
             DetectedAction(
                 name=name,
@@ -338,6 +462,7 @@ def _all_events_from_bucket(bucket: Any, source: str) -> list[DetectedAction]:
                 start_seconds=start_s,
                 end_seconds=end_s,
                 confidence=confidence,
+                ocr_box=ocr_box,
             )
             for start_s, end_s, confidence in _iter_valid_instances(item)
         )
@@ -356,9 +481,181 @@ def _overlap_seconds(
     return start, end
 
 
+def _temporal_iou(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    """Temporal Intersection-over-Union: overlap duration divided by the
+    combined (union) duration the two occurrences span together. 1.0 means
+    they cover exactly the same interval; a value near 0 means one is much
+    longer than their shared overlap (e.g. a person label spanning the
+    whole video against a one-second object blip). This is IoU applied to
+    *time*, not space -- see module docstring's `min_temporal_iou`
+    paragraph for why that's a useful proxy despite not being spatial."""
+    overlap = _overlap_seconds(a_start, a_end, b_start, b_end)
+    if overlap is None:
+        return 0.0
+    union_start, union_end = min(a_start, b_start), max(a_end, b_end)
+    union = union_end - union_start
+    if union <= 0:
+        return 0.0
+    return (overlap[1] - overlap[0]) / union
+
+
+def _observed_people_intervals(
+    insights: dict[str, Any],
+) -> list[list[tuple[float, float]]] | None:
+    """Per-distinct-person lists of (start, end) intervals from the
+    `observedPeople` insight (Advanced-preset only -- see README), or None
+    if that bucket is absent/empty, meaning the data needed for
+    `_people_in_frame_count` simply isn't there (distinct from "zero people
+    tracked", a real but different outcome)."""
+    raw_people = insights.get("observedPeople") or insights.get("people")
+    if not isinstance(raw_people, list) or not raw_people:
+        return None
+    intervals: list[list[tuple[float, float]]] = []
+    for raw_person in cast("list[Any]", raw_people):
+        person = cast("dict[str, Any]", raw_person)
+        intervals.append(
+            [(start_s, end_s) for start_s, end_s, _ in _iter_valid_instances(person)]
+        )
+    return intervals
+
+
+def _people_in_frame_count(
+    people_intervals: list[list[tuple[float, float]]] | None,
+    start: float,
+    end: float,
+) -> int | None:
+    """How many distinct tracked people (`_observed_people_intervals`) had
+    at least one instance overlapping [start, end], or None if no
+    `observedPeople` data was available at all to answer the question."""
+    if people_intervals is None:
+        return None
+    return sum(
+        1
+        for person_spans in people_intervals
+        if any(_overlap_seconds(start, end, s, e) is not None for s, e in person_spans)
+    )
+
+
+def _matches_composite_side(
+    actions: list[DetectedAction],
+    side: CompositeSide,
+    frame_width: float | None,
+    frame_height: float | None,
+) -> list[DetectedAction]:
+    """Every item in `actions` that matches one side of a composite
+    (`CompositeSide.matches`), excluding an OCR item that looks like a
+    burned-in overlay (`_looks_like_ocr_overlay`) -- overlays are the only
+    items with a spatial box to judge at all, so this excludes nothing for
+    any non-OCR item."""
+    return [
+        a
+        for a in actions
+        if side.matches(a.name)
+        and not _looks_like_ocr_overlay(a.ocr_box, frame_width, frame_height)
+    ]
+
+
+def _composite_overlap_window(
+    left: DetectedAction,
+    right: DetectedAction,
+    min_overlap_seconds: float | None,
+    min_temporal_iou: float | None,
+) -> tuple[float, float] | None:
+    """The [start, end] window `left` and `right` overlap in, or None if
+    they don't overlap at all, or the overlap fails the opt-in
+    `min_overlap_seconds`/`min_temporal_iou` thresholds -- see
+    `_derive_composite_actions`'s docstring for what each means."""
+    overlap = _overlap_seconds(
+        left.start_seconds, left.end_seconds, right.start_seconds, right.end_seconds
+    )
+    if overlap is None:
+        return None
+    if (
+        min_overlap_seconds is not None
+        and (overlap[1] - overlap[0]) < min_overlap_seconds
+    ):
+        return None
+    if min_temporal_iou is not None:
+        iou = _temporal_iou(
+            left.start_seconds, left.end_seconds, right.start_seconds, right.end_seconds
+        )
+        if iou < min_temporal_iou:
+            return None
+    return overlap
+
+
+def _composite_evidence(
+    left: DetectedAction, right: DetectedAction, people_in_frame: int | None
+) -> str:
+    """The human-readable `evidence` string for one derived composite
+    occurrence: the two contributing items, plus a people-in-frame count
+    when `observedPeople` data was available at all (see
+    `_people_in_frame_count`)."""
+    evidence = f"{left.name} ({left.source}) + {right.name} ({right.source})"
+    if people_in_frame is not None:
+        evidence += f" -- {people_in_frame} person(s) in frame"
+    return evidence
+
+
+def _rejected_by_single_person_filter(
+    people_in_frame: int | None, require_single_person: bool
+) -> bool:
+    """True if `require_single_person` is on and the people-in-frame count
+    is known but isn't exactly 1 -- see `_derive_composite_actions`'s
+    docstring for why "unknown" (None) is never rejected here."""
+    if not require_single_person or people_in_frame is None:
+        return False
+    return people_in_frame != 1
+
+
+def _best_composite_occurrences(
+    composite: CompositeAction,
+    actions: list[DetectedAction],
+    min_overlap_seconds: float | None,
+    frame_width: float | None,
+    frame_height: float | None,
+    min_temporal_iou: float | None,
+    people_intervals: list[list[tuple[float, float]]] | None,
+    require_single_person: bool,
+) -> dict[tuple[str, float, float], tuple[float, str]]:
+    """The best (highest-confidence) occurrence per (name, start, end) key
+    for one composite action, across every left/right item pair that
+    overlaps and survives every opt-in filter -- one composite's
+    contribution to `_derive_composite_actions`'s `best_by_key`."""
+    left_items = _matches_composite_side(
+        actions, composite.left, frame_width, frame_height
+    )
+    right_items = _matches_composite_side(
+        actions, composite.right, frame_width, frame_height
+    )
+
+    best: dict[tuple[str, float, float], tuple[float, str]] = {}
+    for left, right in product(left_items, right_items):
+        overlap = _composite_overlap_window(
+            left, right, min_overlap_seconds, min_temporal_iou
+        )
+        if overlap is None or left.confidence is None or right.confidence is None:
+            continue
+        people_in_frame = _people_in_frame_count(
+            people_intervals, overlap[0], overlap[1]
+        )
+        if _rejected_by_single_person_filter(people_in_frame, require_single_person):
+            continue
+        confidence = min(left.confidence, right.confidence)
+        key = (composite.name, *overlap)
+        if key not in best or confidence > best[key][0]:
+            best[key] = (confidence, _composite_evidence(left, right, people_in_frame))
+    return best
+
+
 def _derive_composite_actions(
     actions: list[DetectedAction],
     min_overlap_seconds: float | None = None,
+    frame_width: float | None = None,
+    frame_height: float | None = None,
+    min_temporal_iou: float | None = None,
+    people_intervals: list[list[tuple[float, float]]] | None = None,
+    require_single_person: bool = False,
 ) -> list[DetectedAction]:
     """Synthesize named composite actions (`COMPOSITE_ACTIONS`, source
     "derived") from temporal overlaps between two independently-detected
@@ -383,35 +680,45 @@ def _derive_composite_actions(
     Each returned action's `evidence` names the two items that produced it
     (e.g. "person (labels) + cell phone (objects)"), so a reviewer can see
     why it was flagged without re-running raw insights.
+
+    `frame_width`/`frame_height` (the source video's pixel dimensions, from
+    `_video_dimensions`), if both given, let `_looks_like_ocr_overlay`
+    exclude an OCR item that looks like a burned-in overlay (a camera
+    timestamp, a watermark) from matching as composite evidence -- this
+    only ever affects OCR-sourced items (everything else has no spatial
+    box to judge), and currently only `person handling cash`'s right side
+    is OCR-based.
+
+    `min_temporal_iou`, if given, drops an overlap whose temporal
+    Intersection-over-Union (`_temporal_iou`) is below it -- a *time*-only
+    proxy for "these two detections' durations line up," not a spatial
+    measure (see module docstring).
+
+    `people_intervals` (from `_observed_people_intervals`), if given,
+    attaches a people-in-frame count to `evidence` for every derived
+    action, and `require_single_person`, if true, additionally drops any
+    overlap where that count isn't exactly 1 (see module docstring).
+
+    The per-composite work (matching each side, filtering, and picking the
+    best occurrence per key) lives in `_best_composite_occurrences`; this
+    function just runs that once per entry in `COMPOSITE_ACTIONS` and merges
+    the results, keeping this top-level function's own control flow (and
+    Cognitive Complexity) minimal.
     """
     best_by_key: dict[tuple[str, float, float], tuple[float, str]] = {}
-    for composite in cast("list[CompositeAction]", COMPOSITE_ACTIONS):
-        left_items = [a for a in actions if composite.left.matches(a.name)]
-        right_items = [a for a in actions if composite.right.matches(a.name)]
-        for left in left_items:
-            for right in right_items:
-                overlap = _overlap_seconds(
-                    left.start_seconds,
-                    left.end_seconds,
-                    right.start_seconds,
-                    right.end_seconds,
-                )
-                if overlap is None:
-                    continue
-                if (
-                    min_overlap_seconds is not None
-                    and (overlap[1] - overlap[0]) < min_overlap_seconds
-                ):
-                    continue
-                if left.confidence is None or right.confidence is None:
-                    continue
-                confidence = min(left.confidence, right.confidence)
-                key = (composite.name, *overlap)
-                if key not in best_by_key or confidence > best_by_key[key][0]:
-                    evidence = (
-                        f"{left.name} ({left.source}) + {right.name} ({right.source})"
-                    )
-                    best_by_key[key] = (confidence, evidence)
+    for composite in COMPOSITE_ACTIONS:
+        best_by_key.update(
+            _best_composite_occurrences(
+                composite,
+                actions,
+                min_overlap_seconds,
+                frame_width,
+                frame_height,
+                min_temporal_iou,
+                people_intervals,
+                require_single_person,
+            )
+        )
 
     return [
         DetectedAction(
@@ -466,11 +773,45 @@ def _merge_nearby_occurrences(
     return merged
 
 
+def _merge_events(events: list[ActionEvent], gap_seconds: float) -> list[ActionEvent]:
+    """`_merge_nearby_occurrences` for `ActionEvent` instead of
+    `DetectedAction` -- same merge, just round-tripped through
+    `DetectedAction` (whose `name` field lines up with `ActionEvent`'s
+    `matched_term`) so the interval-merge logic exists in exactly one place.
+    Used by `analyze()`'s opt-in `merge_gap_seconds`.
+    """
+    as_actions = [
+        DetectedAction(
+            name=e.matched_term,
+            source=e.source,
+            start_seconds=e.start_seconds,
+            end_seconds=e.end_seconds,
+            confidence=e.confidence,
+            evidence=e.evidence,
+        )
+        for e in events
+    ]
+    merged = _merge_nearby_occurrences(as_actions, gap_seconds=gap_seconds)
+    return [
+        ActionEvent(
+            source=a.source,
+            matched_term=a.name,
+            start_seconds=a.start_seconds,
+            end_seconds=a.end_seconds,
+            confidence=a.confidence,
+            evidence=a.evidence,
+        )
+        for a in merged
+    ]
+
+
 def analyze_all(
     index_payload: dict[str, Any],
     min_confidence: float | None = None,
     min_overlap_seconds: float | None = None,
     merge_gap_seconds: float | None = None,
+    min_temporal_iou: float | None = None,
+    require_single_person: bool = False,
 ) -> AllActionsReport:
     """Extract *every* timestamped label/keyword Video Indexer detected in
     the video -- a full "all actions" timeline, with no filtering to a
@@ -487,9 +828,15 @@ def analyze_all(
     to collapse occurrences of the same action within that many seconds of
     each other (or overlapping) into fewer, more meaningful spans. Applied
     after composite derivation, so it also merges fragmented composites.
+
+    `min_temporal_iou`/`require_single_person`, if given, are passed to
+    `_derive_composite_actions` -- see its docstring and the module
+    docstring's paragraph on both (neither is real spatial gating).
     """
     insights = _extract_insights(index_payload)
     duration = _video_duration_seconds(index_payload, insights)
+    frame_dims = _video_dimensions(index_payload)
+    people_intervals = _observed_people_intervals(insights)
 
     actions: list[DetectedAction] = []
     actions.extend(_all_events_from_bucket(insights.get("labels"), "labels"))
@@ -497,7 +844,15 @@ def analyze_all(
     actions.extend(_all_events_from_bucket(insights.get("detectedObjects"), "objects"))
     actions.extend(_all_events_from_bucket(insights.get("ocr"), "ocr"))
     actions.extend(
-        _derive_composite_actions(actions, min_overlap_seconds=min_overlap_seconds)
+        _derive_composite_actions(
+            actions,
+            min_overlap_seconds=min_overlap_seconds,
+            frame_width=frame_dims[0] if frame_dims else None,
+            frame_height=frame_dims[1] if frame_dims else None,
+            min_temporal_iou=min_temporal_iou,
+            people_intervals=people_intervals,
+            require_single_person=require_single_person,
+        )
     )
 
     if min_confidence is not None:
@@ -528,9 +883,24 @@ def analyze(
     action: str,
     extra_synonyms: list[str] | None = None,
     min_overlap_seconds: float | None = None,
+    merge_gap_seconds: float | None = None,
+    min_temporal_iou: float | None = None,
+    require_single_person: bool = False,
 ) -> ActionReport:
     """Extract action events for `action` (e.g. "jumping") from a Video
-    Indexer index/insights payload."""
+    Indexer index/insights payload.
+
+    `merge_gap_seconds`, if given, collapses occurrences of the same matched
+    term (or overlapping ones) within that many seconds of each other into a
+    single occurrence -- the same opt-in fragmentation cleanup `analyze_all`
+    offers, applied here too so a single-action report (e.g. `main.py
+    --action "using phone"`) isn't stuck with duplicate/overlapping rows for
+    what's really one continuous event. See `_merge_nearby_occurrences`.
+
+    `min_temporal_iou`/`require_single_person`, if given, are passed to
+    `_derive_composite_actions` -- see its docstring and the module
+    docstring's paragraph on both (neither is real spatial gating).
+    """
     action_key = action.lower().strip()
     needles = set(DEFAULT_SYNONYMS.get(action_key, [action_key]))
     if extra_synonyms:
@@ -562,8 +932,16 @@ def analyze(
         + _all_events_from_bucket(insights.get("detectedObjects"), "objects")
         + _all_events_from_bucket(insights.get("ocr"), "ocr")
     )
+    frame_dims = _video_dimensions(index_payload)
+    people_intervals = _observed_people_intervals(insights)
     derived_actions = _derive_composite_actions(
-        all_base_actions, min_overlap_seconds=min_overlap_seconds
+        all_base_actions,
+        min_overlap_seconds=min_overlap_seconds,
+        frame_width=frame_dims[0] if frame_dims else None,
+        frame_height=frame_dims[1] if frame_dims else None,
+        min_temporal_iou=min_temporal_iou,
+        people_intervals=people_intervals,
+        require_single_person=require_single_person,
     )
     for derived in derived_actions:
         if _matches(derived.name, needles):
@@ -577,6 +955,9 @@ def analyze(
                     evidence=derived.evidence,
                 )
             )
+
+    if merge_gap_seconds is not None:
+        events = _merge_events(events, gap_seconds=merge_gap_seconds)
 
     events.sort(key=lambda e: e.start_seconds)
 

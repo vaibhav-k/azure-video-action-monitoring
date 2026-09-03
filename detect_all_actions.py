@@ -107,6 +107,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "collapse fragmented detections into fewer, more meaningful spans.",
     )
     parser.add_argument(
+        "--min-temporal-iou",
+        type=float,
+        default=None,
+        help="Drop a composite/derived action whose temporal "
+        "Intersection-over-Union (overlap duration / combined duration of "
+        "the two contributing detections) is below this (0.0-1.0). A time-"
+        "domain proxy for 'these detections' durations line up closely', "
+        "not spatial evidence -- see README 'Composite (derived) actions'. "
+        "Off by default.",
+    )
+    parser.add_argument(
+        "--require-single-person",
+        action="store_true",
+        help="Only keep a composite/derived action from a moment where "
+        "exactly one person was tracked in frame (needs 'observedPeople' "
+        "data, i.e. an --indexing-preset Advanced video) -- drops "
+        "occurrences with 0 or 2+ people tracked, since those remain "
+        "genuinely ambiguous about which person the action belongs to. "
+        "Off by default; silently has no effect if observedPeople data "
+        "isn't available.",
+    )
+    parser.add_argument(
         "--save-raw-insights",
         action="store_true",
         help="Also save the full raw Video Indexer insights JSON.",
@@ -182,6 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("--merge-gap-seconds must be >= 0.")
         return 2
 
+    if args.min_temporal_iou is not None and not (0.0 <= args.min_temporal_iou <= 1.0):
+        logger.error("--min-temporal-iou must be between 0.0 and 1.0.")
+        return 2
+
     # Base name used for both the Video Indexer upload label and the output
     # filenames. Prefer the local video's filename; fall back to --name or
     # the video ID when running against an already-indexed video with no
@@ -221,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         min_confidence=args.min_confidence,
         min_overlap_seconds=args.min_overlap_seconds,
         merge_gap_seconds=args.merge_gap_seconds,
+        min_temporal_iou=args.min_temporal_iou,
+        require_single_person=args.require_single_person,
     )
 
     print()

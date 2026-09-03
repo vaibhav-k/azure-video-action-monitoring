@@ -406,6 +406,62 @@ def test_analyze_all_merge_gap_seconds_merges_nearby_occurrences(
     assert len(not_merged.actions) == 2
 
 
+def test_analyze_all_min_temporal_iou_and_require_single_person():
+    # Same person+phone shape used in test_action_analyzer.py's analyze()
+    # tests, exercised here through analyze_all() for parity: both new
+    # opt-in filters must reach the "all actions" path too, not just the
+    # single-action one.
+    index: dict[str, Any] = {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [
+                        {
+                            "name": "person",
+                            "instances": [
+                                {
+                                    "confidence": 1.0,
+                                    "start": "0:00:00",
+                                    "end": "0:00:10",
+                                }
+                            ],
+                        }
+                    ],
+                    "keywords": [],
+                    "detectedObjects": [
+                        {
+                            "displayName": "cell phone",
+                            "instances": [
+                                {
+                                    "confidence": 0.8,
+                                    "start": "0:00:03",
+                                    "end": "0:00:06",
+                                }
+                            ],
+                        }
+                    ],
+                    "observedPeople": [
+                        {"instances": [{"start": "0:00:00", "end": "0:00:10"}]},
+                        {"instances": [{"start": "0:00:02", "end": "0:00:08"}]},
+                    ],
+                }
+            }
+        ]
+    }
+
+    baseline = analyze_all(index)
+    derived_names = {a.name for a in baseline.actions if a.source == "derived"}
+    assert "person using phone" in derived_names
+    derived = next(a for a in baseline.actions if a.source == "derived")
+    assert "2 person(s) in frame" in (derived.evidence or "")
+
+    low_iou = analyze_all(index, min_temporal_iou=0.5)
+    assert not any(a.source == "derived" for a in low_iou.actions)
+
+    single_person = analyze_all(index, require_single_person=True)
+    assert not any(a.source == "derived" for a in single_person.actions)
+
+
 def test_all_actions_report_rendering_round_trip(
     sample_index: dict[str, Any], tmp_path: Path
 ):
