@@ -256,8 +256,19 @@ def _item_ocr_box(item: dict[str, Any]) -> tuple[float, float, float, float] | N
         item.get("width"),
         item.get("height"),
     )
-    if all(isinstance(v, (int, float)) for v in (left, top, width, height)):
-        return float(left), float(top), float(width), float(height)  # type: ignore[return-value]
+    # Checked as individual isinstance calls (rather than
+    # `all(isinstance(v, ...) for v in (...))`) so mypy can actually narrow
+    # each variable's type through the `and` chain -- a loop over a tuple
+    # doesn't narrow anything, which previously left the `float(...)` calls
+    # below type-checking against `Any | None` despite a (mismatched)
+    # `# type: ignore` silencing the symptom rather than the cause.
+    if (
+        isinstance(left, (int, float))
+        and isinstance(top, (int, float))
+        and isinstance(width, (int, float))
+        and isinstance(height, (int, float))
+    ):
+        return float(left), float(top), float(width), float(height)
     return None
 
 
