@@ -53,7 +53,8 @@ DEFAULT_SYNONYMS: dict[str, list[str]] = {
 
 @dataclass(frozen=True)
 class CompositeSide:
-    """One side of a composite-action match (see `CompositeAction` below).
+    """
+    One side of a composite-action match (see `CompositeAction` below).
 
     `names`, when given, are exact detected-item names, matched
     case-insensitively -- e.g. a specific object class like "cell phone".
@@ -77,7 +78,8 @@ class CompositeSide:
 
 @dataclass(frozen=True)
 class CompositeAction:
-    """A named action that isn't any single label/keyword/object Video
+    """
+    A named action that isn't any single label/keyword/object Video
     Indexer returns on its own, but a temporal overlap between two things it
     DOES detect. E.g. there's no "using phone" label or object class, but if
     a person-like label and a "cell phone" object are both present at the

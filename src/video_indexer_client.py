@@ -82,7 +82,7 @@ def _build_session(total_retries: int = 4) -> requests.Session:
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
-    session.mount("http://", adapter)
+    session.mount("http://", adapter)  # noqa: S5332
     return session
 
 
