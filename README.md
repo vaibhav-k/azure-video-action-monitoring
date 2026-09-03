@@ -25,7 +25,9 @@ Built and tested against the sample video `people_jumping.mp4` you provided
 - [Run it](#run-it)
 - [Detecting every action in a video](#detecting-every-action-in-a-video)
   - [What if the action/object I need isn't detected?](#what-if-the-actionobject-i-need-isnt-detected)
+  - [Composite (derived) actions](#composite-derived-actions)
 - [Saving an annotated video](#saving-an-annotated-video)
+  - [Quick recipes: annotated video with composite actions](#quick-recipes-annotated-video-with-composite-actions)
 - [Running the tests](#running-the-tests)
 - [Troubleshooting: authentication & permissions](#troubleshooting-authentication--permissions)
 - [Limitations & honest caveats](#limitations--honest-caveats)
@@ -179,6 +181,10 @@ Useful flags:
   `Advanced` for richer object/people insights (fresh uploads only — see
   [What if the action/object I need isn't
   detected?](#what-if-the-actionobject-i-need-isnt-detected)).
+- `--min-overlap-seconds <n>` — for a composite `--action` like `"using
+  phone"` or `"handling cash"`, drop matches whose underlying overlap is
+  shorter than this — see [Composite (derived)
+  actions](#composite-derived-actions).
 - `--check-auth` — verify Azure auth + account access only, no upload.
 - `-v` — verbose/debug logging.
 
@@ -215,6 +221,9 @@ Extra flags:
   below this threshold. Occurrences with no confidence value (some insight
   buckets don't score every item) are always kept.
 - `--indexing-preset <preset>` — see below.
+- `--min-overlap-seconds <n>` / `--merge-gap-seconds <n>` — tune composite
+  (derived) actions like "person using phone" — see [Composite (derived)
+  actions](#composite-derived-actions) below.
 
 Same caveat as above applies here too: this reports whatever Video Indexer's
 default model tagged in `labels`/`keywords`/`detectedObjects`/`ocr` — it is
@@ -283,6 +292,89 @@ upgrade path (e.g. an Azure Custom Vision classifier trained on "cash
 visible" vs. not, plugged in alongside `video_indexer_client.py` as a
 second insights source).
 
+### Composite (derived) actions
+
+Some things worth reporting — "a person using a phone", "a person handling
+cash" — aren't any single label, keyword, or object Video Indexer returns.
+`action_analyzer.py`'s `_derive_composite_actions` synthesizes these
+(source `"derived"`) from **temporal overlap** between two independently
+detected things already in the report. A person-like label and a
+`cell phone` object both present at the same moment is a reasonable,
+inspectable proxy for "person using phone" — Video Indexer never tagged
+that concept directly, but the two things it did tag line up in time.
+
+Confidence is the **minimum** of the two overlapping items' confidences (a
+composite claim is only as strong as its weaker piece of evidence), and
+each derived row records its `evidence` — the two contributing item names —
+so you can see why it fired without re-running `--save-raw-insights`.
+Current composites, defined in `COMPOSITE_ACTIONS` (`src/constants.py`):
+
+| Derived action | Left | Right | Caveat |
+| --- | --- | --- | --- |
+| `person using phone` | person-like label | `cell phone` object | Overlap is circumstantial: they could be nearby without the phone being touched. |
+| `person driving car` | person-like label | `car`/`outdoor vehicle`/`vehicle` object | Same circumstantial caveat — a person and a car in frame together isn't proof the person is driving it (could be a pedestrian, passenger, or bystander). |
+| `person playing sports` | person-like label | `sports equipment`/`athletic game`/`ball`/`bat`/`racket` object | Same caveat, generalized further — any of these objects near a person matches, not necessarily one they're actively using. |
+| `person handling cash` | person-like label | OCR text matching `DEFAULT_SYNONYMS["cash"]` | Only fires when currency text is both in frame and legible (see OCR caveats above) — misses cash that's present but unreadable. |
+| `person at register` | person-like label | `keyboard`/`laptop`/`computer`/`monitor`/`tv` object | Weakest of the five — Video Indexer has no "cash register"/"POS terminal" class, so this leans on the closest generic object classes available. A person near any keyboard or screen matches, not specifically one behind a checkout counter. |
+
+`COMPOSITE_ACTIONS` entries reference a `CompositeSide`, which matches
+either exact detected names (`names={"cell phone"}`) or a synonym family
+by substring, same as `DEFAULT_SYNONYMS` (`synonyms=(...)`) — the latter is
+what makes `person handling cash` possible at all, since OCR text varies
+per banknote and no fixed set of exact strings could cover it. Add a new
+row to extend detection to another person+object overlap without touching
+the derivation logic itself.
+
+Verified against a real ~28s clip of a person standing and using their
+phone (`detect_all_actions.py --video-id f9m21irr9l`):
+
+```
+   Start       End  Source    Action                    Confidence  Evidence
+00:00.08  00:28.44  labels    person                    1.00        -
+00:00.00  00:18.84  objects   cell phone                0.76        -
+00:00.08  00:18.84  derived   person using phone        0.76        person (labels) + cell phone (objects)
+00:19.00  00:19.44  objects   cell phone                0.71        -
+00:19.00  00:19.44  derived   person using phone        0.71        person (labels) + cell phone (objects)
+00:19.60  00:28.48  objects   cell phone                0.81        -
+00:19.60  00:28.44  derived   person using phone        0.81        person (labels) + cell phone (objects)
+```
+
+(Trimmed to the relevant rows; the full report also lists `car`, `building`,
+`clothing`, `outdoor`, all unrelated to the phone.) Note this run used
+`--min-overlap-seconds` at its default — a fourth, 0.04-second overlap that
+showed up in the raw data (a single-frame detector blip, not a real
+occurrence) was filtered out. That flag and its companion:
+
+- `--min-overlap-seconds <n>` (`detect_all_actions.py` / `main.py`) — drop
+  a derived overlap shorter than this many seconds. Defaults to `0.15`;
+  pass `0` to see every overlap Video Indexer's raw timestamps produce,
+  jitter included.
+- `--merge-gap-seconds <n>` (`detect_all_actions.py` only) — off by
+  default. When set, collapses occurrences of the *same* action within
+  that many seconds of each other (or overlapping) into one combined
+  occurrence — useful once you're past debugging and just want "the
+  cashier picked up their phone 3 separate times" rather than a wall of
+  near-duplicate rows from Video Indexer's frame-level fragmentation.
+
+**Honest limitation: this can't tell *which* person is which.** A derived
+`person using phone` (or `person at register`) means *some* detected person
+overlapped the other evidence at that time — not a specific, identified
+person. If more than one person is ever in frame (e.g. a cashier *and* a
+customer), nothing here can currently attribute the action to one over the
+other. This isn't a gap in this project's code: Video Indexer's own
+documented schemas for [observed
+people](https://learn.microsoft.com/en-us/azure/azure-video-indexer/observed-matched-people-insight)
+and [faces](https://learn.microsoft.com/en-us/azure/azure-video-indexer/face-detection-insight)
+carry only start/end timestamps, no bounding-box or other spatial
+coordinates — confirmed both against those docs and against this project's
+own `--save-raw-insights` captures. If distinguishing roles ever becomes a
+requirement, the honest options are: check whether a different Video
+Indexer tier or API surface exposes spatial data before building around
+it, or add a separate, local computer-vision pass (e.g. a lightweight
+person tracker establishing a fixed "counter region") as a second insights
+source alongside `video_indexer_client.py` — real additional engineering,
+not a config flag.
+
 ## Saving an annotated video
 
 `annotate_video.py` renders a copy of the video with a burned-in overlay
@@ -331,6 +423,12 @@ Flags:
   confidence score are **excluded** by default here (a threshold can't be
   compared against an unknown score) — pass `--include-unscored` to draw
   them regardless of the threshold.
+- `--only-composite` — drop every raw label/keyword/object/ocr detection
+  and draw **only** composite/derived actions (source `"derived"`, e.g.
+  `person using phone`, `person handling cash`) — see [Composite (derived)
+  actions](#composite-derived-actions). The default output filename gets a
+  `.composite_actions` suffix (`<name>.composite_actions.annotated.mp4`) so
+  it doesn't overwrite a plain annotated run of the same video.
 - `--max-lines <n>` — cap simultaneous action lines drawn per frame before
   collapsing the rest into a "+N more" line. Default: `6`.
 - `--out <path>` — output video path. Default: `<out-dir>/<name>.annotated.mp4`.
@@ -343,6 +441,66 @@ Requires `opencv-python-headless` (in `requirements.txt`) to render frames,
 and **`ffmpeg` on your `PATH`** to carry the original audio track over —
 without it, the output is silent and a warning is logged; the video itself
 still renders fine either way.
+
+### Quick recipes: annotated video with composite actions
+
+Two ways to get an annotated video that includes composite ("derived")
+actions like `person using phone` or `person handling cash` — assuming
+your source video is in `input/` (swap `input/your_video.mp4` for your
+actual file). Both are two-command recipes: index once, then annotate
+without any further Azure calls.
+
+**Recipe A — annotate with every detected action** (composites plus
+everything else Video Indexer tagged — `car`, `person`, `outdoor`, etc.):
+
+```bash
+python detect_all_actions.py --video input/your_video.mp4
+python annotate_video.py --video input/your_video.mp4 --report output/your_video.all_actions.json
+```
+
+The first command uploads, indexes, and writes
+`output/your_video.all_actions.json` (every action, composites included,
+per [Composite (derived) actions](#composite-derived-actions) above). The
+second reuses that saved report and the local file for frames, so it
+makes no Azure calls at all — just burns in the overlay.
+
+**Recipe B — annotate with only one composite action isolated** (a
+cleaner overlay when you just want to show, say, phone use, without every
+other label cluttering the video). Reuse the video ID the first command
+above printed to skip a second upload:
+
+```bash
+python main.py --video input/your_video.mp4 --video-id <id-from-recipe-A> --action "using phone"
+python annotate_video.py --video input/your_video.mp4 --report output/your_video.report.json
+```
+
+`--action` takes the composite's name (or any distinctive substring of
+it) — swap `"using phone"` for `"driving car"`, `"playing sports"`,
+`"handling cash"`, or `"at register"` for the other composites currently
+defined in `COMPOSITE_ACTIONS` (`src/constants.py`). If you haven't run
+Recipe A first and don't have a video ID yet, drop `--video-id` from the
+`main.py` command — it'll upload the video itself instead (one Azure
+upload either way, just on whichever command runs first).
+
+Watch out: `--action` is a substring match against **every** detection,
+not just composites — `--action phone` also matches the raw `cell phone`
+object on its own, so Recipe B's overlay can still include a non-composite
+hit alongside the composite you meant to isolate.
+
+**Recipe C — annotate with every composite action, and nothing else** (the
+direct answer if what you want is "show me only the derived/composite
+actions, never the raw labels/objects/ocr they're built from"):
+
+```bash
+python detect_all_actions.py --video input/your_video.mp4
+python annotate_video.py --video input/your_video.mp4 --report output/your_video.all_actions.json --only-composite
+```
+
+Same two commands as Recipe A, plus `--only-composite` on the second one.
+Unlike Recipe B, this can't accidentally pick up a non-composite match —
+it filters strictly on `source == "derived"`, so the overlay only ever
+shows actions actually synthesized by `COMPOSITE_ACTIONS`, across however
+many composite types the video contains at once.
 
 ## Running the tests
 

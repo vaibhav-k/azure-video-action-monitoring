@@ -41,13 +41,14 @@ def to_console_text(report: ActionReport, video_name: str) -> str:
         )
     else:
         lines.append(
-            f"{'Start':>8}  {'End':>8}  {'Source':<8}  {'Matched term':<20}  Confidence"
+            f"{'Start':>8}  {'End':>8}  {'Source':<8}  {'Matched term':<20}  "
+            f"{'Confidence':<10}  Evidence"
         )
         for e in report.events:
             conf = f"{e.confidence:.2f}" if e.confidence is not None else "n/a"
             lines.append(
                 f"{_fmt_seconds(e.start_seconds):>8}  {_fmt_seconds(e.end_seconds):>8}  "
-                f"{e.source:<8}  {e.matched_term:<20}  {conf}"
+                f"{e.source:<8}  {e.matched_term:<20}  {conf:<10}  {e.evidence or '-'}"
             )
     return "\n".join(lines)
 
@@ -70,6 +71,7 @@ def to_dict(report: ActionReport, video_name: str) -> dict[str, Any]:
                 "end_seconds": e.end_seconds,
                 "duration_seconds": e.duration_seconds,
                 "confidence": e.confidence,
+                "evidence": e.evidence,
             }
             for e in report.events
         ],
@@ -154,6 +156,7 @@ def write_html(report: ActionReport, video_name: str, path: Path) -> None:
                 f"<td>{escape(e.source)}</td>"
                 f"<td>{escape(e.matched_term)}</td>"
                 f"<td>{conf}</td>"
+                f"<td>{escape(e.evidence) if e.evidence else '-'}</td>"
                 "</tr>"
             )
             if duration > 0:
@@ -172,7 +175,7 @@ def write_html(report: ActionReport, video_name: str, path: Path) -> None:
                 )
         table_html = (
             "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
-            "<th>Matched term</th><th>Confidence</th></tr></thead><tbody>"
+            "<th>Matched term</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody>"
             + "".join(rows)
             + "</tbody></table>"
         )
@@ -235,12 +238,15 @@ def to_console_text_all(report: AllActionsReport, video_name: str) -> str:
         )
 
     lines.append("")
-    lines.append(f"{'Start':>8}  {'End':>8}  {'Source':<8}  {'Action':<24}  Confidence")
+    lines.append(
+        f"{'Start':>8}  {'End':>8}  {'Source':<8}  {'Action':<24}  "
+        f"{'Confidence':<10}  Evidence"
+    )
     for a in report.actions:
         conf = f"{a.confidence:.2f}" if a.confidence is not None else "n/a"
         lines.append(
             f"{_fmt_seconds(a.start_seconds):>8}  {_fmt_seconds(a.end_seconds):>8}  "
-            f"{a.source:<8}  {a.name:<24}  {conf}"
+            f"{a.source:<8}  {a.name:<24}  {conf:<10}  {a.evidence or '-'}"
         )
     return "\n".join(lines)
 
@@ -274,6 +280,7 @@ def to_dict_all(report: AllActionsReport, video_name: str) -> dict[str, Any]:
                 "end_seconds": a.end_seconds,
                 "duration_seconds": a.duration_seconds,
                 "confidence": a.confidence,
+                "evidence": a.evidence,
             }
             for a in report.actions
         ],
@@ -427,11 +434,12 @@ def write_html_all(report: AllActionsReport, video_name: str, path: Path) -> Non
             f"<td>{escape(a.source)}</td>"
             f"<td>{escape(a.name)}</td>"
             f"<td>{conf}</td>"
+            f"<td>{escape(a.evidence) if a.evidence else '-'}</td>"
             "</tr>"
         )
     log_table_html = (
         "<table><thead><tr><th>Start</th><th>End</th><th>Source</th>"
-        "<th>Action</th><th>Confidence</th></tr></thead><tbody>"
+        "<th>Action</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody>"
         + "".join(log_rows)
         + "</tbody></table>"
     )

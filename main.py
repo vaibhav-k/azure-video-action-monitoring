@@ -21,6 +21,7 @@ from pathlib import Path
 
 from src.action_analyzer import analyze
 from src.config import ConfigError, Settings
+from src.constants import DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS
 from src.report import to_console_text, write_html, write_json
 from src.video_indexer_client import VideoIndexerClient, VideoIndexerError
 
@@ -79,6 +80,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Extra term to also match (repeatable).",
     )
     parser.add_argument(
+        "--min-overlap-seconds",
+        type=float,
+        default=DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS,
+        help="Drop a composite/derived match (e.g. '--action \"using phone\"') "
+        f"whose underlying overlap is shorter than this many seconds -- "
+        f"filters out detector jitter. Default: {DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS}. "
+        "Pass 0 to keep every overlap regardless of length.",
+    )
+    parser.add_argument(
         "--save-raw-insights",
         action="store_true",
         help="Also save the full raw Video Indexer insights JSON.",
@@ -133,6 +143,10 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Video file not found: %s", args.video)
         return 2
 
+    if args.min_overlap_seconds < 0:
+        logger.error("--min-overlap-seconds must be >= 0.")
+        return 2
+
     # Base name used for both the Video Indexer upload label and the output
     # filenames. Prefer the local video's filename; fall back to --name or
     # the video ID when running against an already-indexed video with no
@@ -167,7 +181,12 @@ def main(argv: list[str] | None = None) -> int:
         raw_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
         logger.info("Saved raw insights to %s", raw_path)
 
-    report = analyze(index, action=args.action, extra_synonyms=args.synonym)
+    report = analyze(
+        index,
+        action=args.action,
+        extra_synonyms=args.synonym,
+        min_overlap_seconds=args.min_overlap_seconds,
+    )
 
     print()
     print(to_console_text(report, display_name))

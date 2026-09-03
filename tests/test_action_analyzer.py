@@ -149,6 +149,96 @@ def test_analyze_phone_matches_derived_person_using_phone_overlap():
     }
 
 
+def test_analyze_min_overlap_seconds_filters_short_composite_overlap():
+    # Same shape as test_analyze_phone_matches_derived_person_using_phone_overlap,
+    # but the overlap is a 0.02s sliver -- min_overlap_seconds should drop
+    # the derived match while leaving the direct "cell phone" object match
+    # untouched (that one isn't a composite, so the threshold doesn't apply
+    # to it).
+    index: dict[str, Any] = {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [
+                        {
+                            "name": "person",
+                            "instances": [
+                                {
+                                    "confidence": 1.0,
+                                    "start": "0:00:00",
+                                    "end": "0:00:10",
+                                }
+                            ],
+                        }
+                    ],
+                    "keywords": [],
+                    "detectedObjects": [
+                        {
+                            "displayName": "cell phone",
+                            "instances": [
+                                {
+                                    "confidence": 0.8,
+                                    "start": "0:00:03",
+                                    "end": "0:00:03.02",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    report = analyze(index, action="phone", min_overlap_seconds=0.15)
+
+    matched = {(e.matched_term, e.source) for e in report.events}
+    assert matched == {("cell phone", "objects")}
+
+
+def test_analyze_register_matches_derived_person_at_register_overlap():
+    # "person at register" is the weakest-evidence composite (any
+    # keyboard/monitor-like object near a person), added for a checkout/
+    # cashier monitoring use case -- verify it derives the same way as the
+    # phone composite.
+    index: dict[str, Any] = {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [
+                        {
+                            "name": "person",
+                            "instances": [
+                                {
+                                    "confidence": 0.9,
+                                    "start": "0:00:00",
+                                    "end": "0:00:10",
+                                }
+                            ],
+                        }
+                    ],
+                    "keywords": [],
+                    "detectedObjects": [
+                        {
+                            "displayName": "keyboard",
+                            "instances": [
+                                {
+                                    "confidence": 0.6,
+                                    "start": "0:00:02",
+                                    "end": "0:00:05",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    report = analyze(index, action="register")
+
+    matched_names = {e.matched_term for e in report.events}
+    assert matched_names == {"person at register"}
+    assert report.events[0].confidence == pytest.approx(0.6)  # min(0.9, 0.6)
+
+
 def test_report_rendering_round_trip(sample_index: dict[str, Any], tmp_path: Path):
     report = analyze(sample_index, action="jumping")
 

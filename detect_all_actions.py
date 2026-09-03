@@ -26,6 +26,7 @@ from pathlib import Path
 
 from src.action_analyzer import analyze_all
 from src.config import ConfigError, Settings
+from src.constants import DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS
 from src.report import to_console_text_all, write_html_all, write_json_all
 from src.video_indexer_client import VideoIndexerClient, VideoIndexerError
 
@@ -86,6 +87,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Drop occurrences whose confidence score is below this (0.0-1.0). "
         "Occurrences with no confidence value are always kept.",
+    )
+    parser.add_argument(
+        "--min-overlap-seconds",
+        type=float,
+        default=DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS,
+        help="Drop composite/derived actions (e.g. 'person using phone') whose "
+        f"underlying overlap is shorter than this many seconds -- filters out "
+        f"detector jitter. Default: {DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS}. "
+        "Pass 0 to keep every overlap regardless of length.",
+    )
+    parser.add_argument(
+        "--merge-gap-seconds",
+        type=float,
+        default=None,
+        help="Merge occurrences of the same action within this many seconds "
+        "of each other (or overlapping) into one combined occurrence. Off by "
+        "default (every occurrence reported separately); try e.g. 1.0 to "
+        "collapse fragmented detections into fewer, more meaningful spans.",
     )
     parser.add_argument(
         "--save-raw-insights",
@@ -155,6 +174,14 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("--min-confidence must be between 0.0 and 1.0.")
         return 2
 
+    if args.min_overlap_seconds < 0:
+        logger.error("--min-overlap-seconds must be >= 0.")
+        return 2
+
+    if args.merge_gap_seconds is not None and args.merge_gap_seconds < 0:
+        logger.error("--merge-gap-seconds must be >= 0.")
+        return 2
+
     # Base name used for both the Video Indexer upload label and the output
     # filenames. Prefer the local video's filename; fall back to --name or
     # the video ID when running against an already-indexed video with no
@@ -189,7 +216,12 @@ def main(argv: list[str] | None = None) -> int:
         raw_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
         logger.info("Saved raw insights to %s", raw_path)
 
-    report = analyze_all(index, min_confidence=args.min_confidence)
+    report = analyze_all(
+        index,
+        min_confidence=args.min_confidence,
+        min_overlap_seconds=args.min_overlap_seconds,
+        merge_gap_seconds=args.merge_gap_seconds,
+    )
 
     print()
     print(to_console_text_all(report, display_name))

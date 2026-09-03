@@ -47,7 +47,23 @@ proxy for it. Same honest-caveat pattern as everywhere else in this
 module: an overlap is circumstantial evidence, not a verified claim that
 the person is actually using the phone (they could be nearby without
 touching it) -- treat it the same way as the rest of this module's output,
-as a first pass to review rather than a guaranteed-accurate label.
+as a first pass to review rather than a guaranteed-accurate label. Each
+derived `DetectedAction` records its `evidence` (the two contributing item
+names/sources) so a reviewer can see why it was flagged without re-running
+raw insights.
+
+Two more honest limitations worth stating plainly, since they bound what
+this module can ever claim: (1) `min_overlap_seconds` (opt-in) drops
+overlaps shorter than a threshold, since a 1-2 frame overlap is usually
+detector jitter, not a real co-occurrence -- but this is a blunt filter,
+not a confidence measure. (2) None of `labels`/`detectedObjects`/
+`observedPeople` include *spatial* (bounding-box) coordinates in this
+project's Video Indexer responses (confirmed against Microsoft's own
+insight schemas as well as this project's own raw insights captures) --
+so nothing here can distinguish *which* person is which (e.g. "the
+cashier" vs. a customer walking past) when more than one is in frame. A
+derived "person X" action means *some* detected person overlapped the
+other evidence, not a specific, identified one.
 """
 
 from __future__ import annotations
@@ -56,7 +72,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from src.constants import COMPOSITE_ACTIONS, DEFAULT_SYNONYMS
+from src.constants import COMPOSITE_ACTIONS, DEFAULT_SYNONYMS, CompositeAction
 
 
 @dataclass
@@ -68,6 +84,7 @@ class ActionEvent:
     start_seconds: float
     end_seconds: float
     confidence: float | None
+    evidence: str | None = None  # for source="derived": the two items that overlapped
 
     @property
     def duration_seconds(self) -> float:
@@ -234,6 +251,7 @@ class DetectedAction:
     start_seconds: float
     end_seconds: float
     confidence: float | None
+    evidence: str | None = None  # for source="derived": the two items that overlapped
 
     @property
     def duration_seconds(self) -> float:
@@ -338,7 +356,10 @@ def _overlap_seconds(
     return start, end
 
 
-def _derive_composite_actions(actions: list[DetectedAction]) -> list[DetectedAction]:
+def _derive_composite_actions(
+    actions: list[DetectedAction],
+    min_overlap_seconds: float | None = None,
+) -> list[DetectedAction]:
     """Synthesize named composite actions (`COMPOSITE_ACTIONS`, source
     "derived") from temporal overlaps between two independently-detected
     concepts already in `actions` -- e.g. a person-like label and a "cell
@@ -353,11 +374,20 @@ def _derive_composite_actions(actions: list[DetectedAction]) -> list[DetectedAct
     interval, each pairing with the same object -- are deduplicated,
     keeping the highest confidence, so one real overlap doesn't get
     reported as several near-duplicate rows.
+
+    `min_overlap_seconds`, if given, drops overlaps shorter than it (a 1-2
+    frame overlap between two independent detections is usually detector
+    jitter, not a real co-occurrence) -- opt-in, so existing callers see
+    every overlap unless they ask for filtering.
+
+    Each returned action's `evidence` names the two items that produced it
+    (e.g. "person (labels) + cell phone (objects)"), so a reviewer can see
+    why it was flagged without re-running raw insights.
     """
-    best_by_key: dict[tuple[str, float, float], float | None] = {}
-    for name, left_names, right_names in COMPOSITE_ACTIONS:
-        left_items = [a for a in actions if a.name.lower() in left_names]
-        right_items = [a for a in actions if a.name.lower() in right_names]
+    best_by_key: dict[tuple[str, float, float], tuple[float, str]] = {}
+    for composite in cast("list[CompositeAction]", COMPOSITE_ACTIONS):
+        left_items = [a for a in actions if composite.left.matches(a.name)]
+        right_items = [a for a in actions if composite.right.matches(a.name)]
         for left in left_items:
             for right in right_items:
                 overlap = _overlap_seconds(
@@ -368,14 +398,20 @@ def _derive_composite_actions(actions: list[DetectedAction]) -> list[DetectedAct
                 )
                 if overlap is None:
                     continue
+                if (
+                    min_overlap_seconds is not None
+                    and (overlap[1] - overlap[0]) < min_overlap_seconds
+                ):
+                    continue
                 if left.confidence is None or right.confidence is None:
                     continue
                 confidence = min(left.confidence, right.confidence)
-                key = (name, *overlap)
-                if key not in best_by_key or confidence > cast(
-                    "float", best_by_key[key]
-                ):
-                    best_by_key[key] = confidence
+                key = (composite.name, *overlap)
+                if key not in best_by_key or confidence > best_by_key[key][0]:
+                    evidence = (
+                        f"{left.name} ({left.source}) + {right.name} ({right.source})"
+                    )
+                    best_by_key[key] = (confidence, evidence)
 
     return [
         DetectedAction(
@@ -384,14 +420,57 @@ def _derive_composite_actions(actions: list[DetectedAction]) -> list[DetectedAct
             start_seconds=start_s,
             end_seconds=end_s,
             confidence=confidence,
+            evidence=evidence,
         )
-        for (name, start_s, end_s), confidence in best_by_key.items()
+        for (name, start_s, end_s), (confidence, evidence) in best_by_key.items()
     ]
+
+
+def _merge_nearby_occurrences(
+    actions: list[DetectedAction], gap_seconds: float
+) -> list[DetectedAction]:
+    """Merge occurrences of the same (name, source) that overlap or are
+    within `gap_seconds` of each other into a single occurrence spanning
+    their combined interval, keeping the higher confidence and either's
+    evidence. Reduces fragmented near-duplicate detections -- e.g. Video
+    Indexer (or `_derive_composite_actions`) reporting what's really one
+    continuous event as several adjacent slivers -- to a smaller number of
+    human-meaningful spans. Opt-in: only called when a caller passes
+    `merge_gap_seconds` to `analyze_all`.
+    """
+    by_key: dict[tuple[str, str], list[DetectedAction]] = {}
+    for a in actions:
+        by_key.setdefault((a.name, a.source), []).append(a)
+
+    merged: list[DetectedAction] = []
+    for items in by_key.values():
+        items.sort(key=lambda a: a.start_seconds)
+        current = items[0]
+        for nxt in items[1:]:
+            if nxt.start_seconds <= current.end_seconds + gap_seconds:
+                confidences = [
+                    c for c in (current.confidence, nxt.confidence) if c is not None
+                ]
+                current = DetectedAction(
+                    name=current.name,
+                    source=current.source,
+                    start_seconds=current.start_seconds,
+                    end_seconds=max(current.end_seconds, nxt.end_seconds),
+                    confidence=max(confidences) if confidences else None,
+                    evidence=current.evidence or nxt.evidence,
+                )
+            else:
+                merged.append(current)
+                current = nxt
+        merged.append(current)
+    return merged
 
 
 def analyze_all(
     index_payload: dict[str, Any],
     min_confidence: float | None = None,
+    min_overlap_seconds: float | None = None,
+    merge_gap_seconds: float | None = None,
 ) -> AllActionsReport:
     """Extract *every* timestamped label/keyword Video Indexer detected in
     the video -- a full "all actions" timeline, with no filtering to a
@@ -400,6 +479,14 @@ def analyze_all(
     `min_confidence` (0.0-1.0), if given, drops occurrences whose confidence
     is known and below the threshold; occurrences with no confidence value
     are always kept, since Video Indexer doesn't score every insight bucket.
+
+    `min_overlap_seconds`, if given, is passed to `_derive_composite_actions`
+    to drop composite overlaps shorter than it (detector jitter).
+
+    `merge_gap_seconds`, if given, is passed to `_merge_nearby_occurrences`
+    to collapse occurrences of the same action within that many seconds of
+    each other (or overlapping) into fewer, more meaningful spans. Applied
+    after composite derivation, so it also merges fragmented composites.
     """
     insights = _extract_insights(index_payload)
     duration = _video_duration_seconds(index_payload, insights)
@@ -409,12 +496,17 @@ def analyze_all(
     actions.extend(_all_events_from_bucket(insights.get("keywords"), "keywords"))
     actions.extend(_all_events_from_bucket(insights.get("detectedObjects"), "objects"))
     actions.extend(_all_events_from_bucket(insights.get("ocr"), "ocr"))
-    actions.extend(_derive_composite_actions(actions))
+    actions.extend(
+        _derive_composite_actions(actions, min_overlap_seconds=min_overlap_seconds)
+    )
 
     if min_confidence is not None:
         actions = [
             a for a in actions if a.confidence is None or a.confidence >= min_confidence
         ]
+
+    if merge_gap_seconds is not None:
+        actions = _merge_nearby_occurrences(actions, gap_seconds=merge_gap_seconds)
 
     actions.sort(key=lambda a: (a.start_seconds, a.name))
 
@@ -435,6 +527,7 @@ def analyze(
     index_payload: dict[str, Any],
     action: str,
     extra_synonyms: list[str] | None = None,
+    min_overlap_seconds: float | None = None,
 ) -> ActionReport:
     """Extract action events for `action` (e.g. "jumping") from a Video
     Indexer index/insights payload."""
@@ -469,7 +562,10 @@ def analyze(
         + _all_events_from_bucket(insights.get("detectedObjects"), "objects")
         + _all_events_from_bucket(insights.get("ocr"), "ocr")
     )
-    for derived in _derive_composite_actions(all_base_actions):
+    derived_actions = _derive_composite_actions(
+        all_base_actions, min_overlap_seconds=min_overlap_seconds
+    )
+    for derived in derived_actions:
         if _matches(derived.name, needles):
             events.append(
                 ActionEvent(
@@ -478,6 +574,7 @@ def analyze(
                     start_seconds=derived.start_seconds,
                     end_seconds=derived.end_seconds,
                     confidence=derived.confidence,
+                    evidence=derived.evidence,
                 )
             )
 

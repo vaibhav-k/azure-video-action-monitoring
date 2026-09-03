@@ -203,6 +203,9 @@ def test_analyze_all_derives_person_using_phone_from_overlap(
     assert derived[0].start_seconds == pytest.approx(3.0)
     assert derived[0].end_seconds == pytest.approx(6.0)
     assert derived[0].confidence == pytest.approx(0.8)  # min(1.0, 0.8)
+    # Evidence names the two contributing items, so a reviewer can see why
+    # this fired without re-running raw insights.
+    assert derived[0].evidence == "person (labels) + cell phone (objects)"
 
 
 def test_analyze_all_does_not_derive_when_no_overlap(
@@ -245,6 +248,162 @@ def test_analyze_all_does_not_derive_when_no_overlap(
     }
     report = analyze_all(index)
     assert not [a for a in report.actions if a.source == "derived"]
+
+
+def _person_and_cell_phone_index(phone_start: str, phone_end: str) -> dict[str, Any]:
+    """Shared fixture builder for the min_overlap_seconds tests below: a
+    person label spanning 0-10s, and a cell phone object at the given
+    (start, end) timestamps."""
+    return {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [
+                        {
+                            "name": "person",
+                            "instances": [
+                                {
+                                    "confidence": 1.0,
+                                    "start": "0:00:00",
+                                    "end": "0:00:10",
+                                }
+                            ],
+                        }
+                    ],
+                    "keywords": [],
+                    "detectedObjects": [
+                        {
+                            "displayName": "cell phone",
+                            "instances": [
+                                {
+                                    "confidence": 0.8,
+                                    "start": phone_start,
+                                    "end": phone_end,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+
+def test_analyze_all_min_overlap_seconds_drops_short_overlaps():
+    # A 0.05s overlap is the kind of single-frame detector blip
+    # min_overlap_seconds exists to filter -- e.g. the real 0.04s
+    # "person using phone" occurrence seen in this project's own captured
+    # data (see README), not a meaningful co-occurrence.
+    index = _person_and_cell_phone_index("0:00:03", "0:00:03.05")
+
+    unfiltered = analyze_all(index)
+    assert len([a for a in unfiltered.actions if a.source == "derived"]) == 1
+
+    filtered = analyze_all(index, min_overlap_seconds=0.15)
+    assert not [a for a in filtered.actions if a.source == "derived"]
+
+
+def test_analyze_all_min_overlap_seconds_keeps_long_enough_overlaps():
+    index = _person_and_cell_phone_index("0:00:03", "0:00:06")
+
+    report = analyze_all(index, min_overlap_seconds=0.15)
+    derived = [a for a in report.actions if a.source == "derived"]
+
+    assert len(derived) == 1
+    assert derived[0].name == "person using phone"
+
+
+def test_analyze_all_derives_person_handling_cash_from_ocr_overlap():
+    # "person handling cash" has no exact-name match target on its right
+    # side -- it's derived via CompositeSide.synonyms, matching the same
+    # cash-related phrases as DEFAULT_SYNONYMS["cash"] against OCR text,
+    # since printed currency text varies per banknote.
+    index: dict[str, Any] = {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [
+                        {
+                            "name": "person",
+                            "instances": [
+                                {
+                                    "confidence": 0.95,
+                                    "start": "0:00:00",
+                                    "end": "0:00:10",
+                                }
+                            ],
+                        }
+                    ],
+                    "keywords": [],
+                    "ocr": [
+                        {
+                            "text": "WE TRUST",
+                            "confidence": 0.99,
+                            "instances": [{"start": "0:00:02", "end": "0:00:04"}],
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    report = analyze_all(index)
+    derived = [a for a in report.actions if a.source == "derived"]
+
+    assert len(derived) == 1
+    assert derived[0].name == "person handling cash"
+    assert derived[0].start_seconds == pytest.approx(2.0)
+    assert derived[0].end_seconds == pytest.approx(4.0)
+    assert derived[0].confidence == pytest.approx(0.95)  # min(0.95, 0.99)
+    assert derived[0].evidence == "person (labels) + WE TRUST (ocr)"
+
+
+def test_analyze_all_merge_gap_seconds_merges_nearby_occurrences(
+    sample_index: dict[str, Any],
+):
+    # Fixture's "jumping" instances are at 3.2-4.0, 15.6-16.4, 28.0-28.4
+    # (approx, per test_analyze_all_summaries_aggregate_per_action's
+    # first/last timestamps) -- far enough apart that no merge_gap_seconds
+    # used here should combine them; this instead uses a small synthetic
+    # index with two occurrences close enough to merge.
+    index: dict[str, Any] = {
+        "videos": [
+            {
+                "insights": {
+                    "labels": [
+                        {
+                            "name": "jumping",
+                            "instances": [
+                                {
+                                    "confidence": 0.7,
+                                    "start": "0:00:01",
+                                    "end": "0:00:02",
+                                },
+                                {
+                                    "confidence": 0.9,
+                                    "start": "0:00:02.3",
+                                    "end": "0:00:03",
+                                },
+                            ],
+                        }
+                    ],
+                    "keywords": [],
+                }
+            }
+        ]
+    }
+
+    unmerged = analyze_all(index)
+    assert len(unmerged.actions) == 2
+
+    merged = analyze_all(index, merge_gap_seconds=0.5)
+    assert len(merged.actions) == 1
+    assert merged.actions[0].start_seconds == pytest.approx(1.0)
+    assert merged.actions[0].end_seconds == pytest.approx(3.0)
+    assert merged.actions[0].confidence == pytest.approx(0.9)  # max of the two
+
+    # A gap tighter than the actual 0.3s gap between them must not merge.
+    not_merged = analyze_all(index, merge_gap_seconds=0.1)
+    assert len(not_merged.actions) == 2
 
 
 def test_all_actions_report_rendering_round_trip(

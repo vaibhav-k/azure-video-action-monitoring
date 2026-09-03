@@ -23,10 +23,17 @@ Only one of --video / --video-id is required, not both:
 *.all_actions.json (every detected action) or main.py's *.report.json (just
 the occurrences of one --action of interest).
 
+--only-composite restricts the overlay to composite/derived actions only
+(e.g. "person using phone", "person handling cash") -- see README
+'Composite (derived) actions'. Combine it with --report/--video-id to
+annotate every composite the video has, or with a single-action --report
+from main.py to isolate just one.
+
 Examples:
     python annotate_video.py --video-id tuxagrberr --min-confidence 0.6
     python annotate_video.py --video tuxagrberr.mp4 --report output/tuxagrberr.all_actions.json
     python .\annotate_video.py --video-id f9m21irr9l --report ./output/f9m21irr9l.report.json --min-confidence 0.7
+    python annotate_video.py --video tuxagrberr.mp4 --report output/tuxagrberr.all_actions.json --only-composite
 """
 
 from __future__ import annotations
@@ -93,6 +100,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also annotate actions with no confidence value (excluded by default, "
         "since a threshold can't be applied to them).",
+    )
+    parser.add_argument(
+        "--only-composite",
+        action="store_true",
+        help='Only draw composite/derived actions (source "derived", e.g. '
+        "'person using phone', 'person handling cash') -- drops every raw "
+        "label/keyword/object/ocr detection so the overlay shows just the "
+        "synthesized actions. See README 'Composite (derived) actions'.",
     )
     parser.add_argument(
         "--max-lines",
@@ -170,6 +185,17 @@ def _load_actions_from_report(report_path: Path) -> list[DetectedAction]:
     )
 
 
+def _filter_only_composite(
+    actions: list[DetectedAction], only_composite: bool
+) -> list[DetectedAction]:
+    """Apply --only-composite: keep just source=="derived" actions (composite
+    actions synthesized by _derive_composite_actions) when set, otherwise
+    return `actions` unchanged."""
+    if not only_composite:
+        return actions
+    return [a for a in actions if a.source == "derived"]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     logging.basicConfig(
@@ -235,8 +261,23 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Could not obtain actions: %s", exc)
         return 1
 
+    if args.only_composite:
+        actions = _filter_only_composite(actions, only_composite=True)
+        logger.info(
+            "--only-composite: %d composite/derived action(s) to draw.", len(actions)
+        )
+        if not actions:
+            logger.warning(
+                "No composite actions found -- the overlay will be empty. "
+                "Composite actions only exist where a rule in COMPOSITE_ACTIONS "
+                "(src/constants.py) actually overlapped two detections; see "
+                "README 'Composite (derived) actions'."
+            )
+
     # Base name for default output filenames, and the frame source itself.
     base_name = args.video.stem if args.video else (args.name or args.video_id)
+    if args.only_composite:
+        base_name = f"{base_name}.composite_actions"
 
     if args.video:
         frame_source = args.video

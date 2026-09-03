@@ -13,7 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from annotate_video import _load_actions_from_report
+from annotate_video import _filter_only_composite, _load_actions_from_report
+from src.action_analyzer import DetectedAction
 from src.video_annotator import VideoAnnotationError
 
 
@@ -89,3 +90,66 @@ def test_rejects_unrecognized_report_shape(tmp_path: Path):
 
     with pytest.raises(VideoAnnotationError):
         _load_actions_from_report(report_path)
+
+
+def _sample_mixed_actions() -> list[DetectedAction]:
+    return [
+        DetectedAction(
+            name="person",
+            source="labels",
+            start_seconds=0.0,
+            end_seconds=10.0,
+            confidence=1.0,
+        ),
+        DetectedAction(
+            name="cell phone",
+            source="objects",
+            start_seconds=3.0,
+            end_seconds=6.0,
+            confidence=0.8,
+        ),
+        DetectedAction(
+            name="person using phone",
+            source="derived",
+            start_seconds=3.0,
+            end_seconds=6.0,
+            confidence=0.8,
+            evidence="person (labels) + cell phone (objects)",
+        ),
+        DetectedAction(
+            name="person handling cash",
+            source="derived",
+            start_seconds=8.0,
+            end_seconds=9.0,
+            confidence=0.9,
+            evidence="person (labels) + WE TRUST (ocr)",
+        ),
+    ]
+
+
+def test_filter_only_composite_keeps_only_derived_actions():
+    actions = _sample_mixed_actions()
+
+    filtered = _filter_only_composite(actions, only_composite=True)
+
+    assert {a.source for a in filtered} == {"derived"}
+    assert {a.name for a in filtered} == {
+        "person using phone",
+        "person handling cash",
+    }
+
+
+def test_filter_only_composite_disabled_returns_everything_unchanged():
+    actions = _sample_mixed_actions()
+
+    filtered = _filter_only_composite(actions, only_composite=False)
+
+    assert filtered == actions
+
+
+def test_filter_only_composite_empty_when_no_derived_actions():
+    actions = [a for a in _sample_mixed_actions() if a.source != "derived"]
+
+    filtered = _filter_only_composite(actions, only_composite=True)
+
+    assert filtered == []
