@@ -9,8 +9,13 @@ waits for it to be processed, then scans the resulting insights for a
 specific action of interest (default: **"jumping"**) and produces an
 oversight report: a console summary, a JSON file, and a self-contained HTML
 timeline you can open in any browser. A second CLI reports *every* action
-Video Indexer detected (not just one), and a third burns the results into an
-annotated copy of the video.
+Video Indexer detected (not just one), a third burns the results into an
+annotated copy of the video, and a fourth (`explore_insights.py`) showcases
+every other Video Indexer capability this action-focused trio doesn't touch —
+faces, transcript/speakers/language, topics, named entities, sentiments,
+emotions, audio effects, shots, and content moderation — see [Showcasing
+every other capability](#showcasing-every-other-capability-explore_insightspy)
+below.
 
 Built and tested against the sample video `people_jumping.mp4` you provided
 (jumping, id = qxxv5h1be9) (boxing, id = tuxagrberr).
@@ -28,6 +33,8 @@ Built and tested against the sample video `people_jumping.mp4` you provided
   - [Composite (derived) actions](#composite-derived-actions)
 - [Saving an annotated video](#saving-an-annotated-video)
   - [Quick recipes: annotated video with composite actions](#quick-recipes-annotated-video-with-composite-actions)
+- [Showcasing every other capability: explore_insights.py](#showcasing-every-other-capability-explore_insightspy)
+  - [What to test it with](#what-to-test-it-with)
 - [Running the tests](#running-the-tests)
 - [Troubleshooting: authentication & permissions](#troubleshooting-authentication--permissions)
 - [Limitations & honest caveats](#limitations--honest-caveats)
@@ -64,6 +71,13 @@ your video ──▶ Video Indexer (upload + AI analysis) ──▶ insights JSO
   detected in the video (see "Detecting every action in a video" below).
 - `annotate_video.py` — the CLI that saves an annotated video (see "Saving
   an annotated video" below).
+- `src/insights_explorer.py` — pulls faces, transcript/speakers/language,
+  topics, named entities, sentiments, emotions, audio effects, shots, and
+  content moderation out of a raw insights payload into a `CapabilitiesReport`.
+- `src/capabilities_report.py` — renders a `CapabilitiesReport` as
+  text/JSON/HTML, mirroring `report.py`'s pattern for the action reports.
+- `explore_insights.py` — the CLI that showcases every capability above (see
+  "Showcasing every other capability" below).
 - `tests/` — unit tests that verify the extraction/reporting/annotation
   logic against a realistic sample insights payload (and a tiny synthetic
   clip for the annotator), so you can trust the code without needing a live
@@ -76,11 +90,14 @@ azure-video-action-monitoring/
 ├── main.py                  # CLI: find one action of interest (default "jumping")
 ├── detect_all_actions.py    # CLI: report every action detected, timestamped
 ├── annotate_video.py        # CLI: burn detected actions into a copy of the video
+├── explore_insights.py      # CLI: showcase faces/transcript/topics/entities/etc.
 ├── src/
 │   ├── config.py            # Loads/validates Settings from .env / environment
 │   ├── video_indexer_client.py  # Azure AD auth + Video Indexer upload/poll/fetch
 │   ├── action_analyzer.py   # Turns raw insights into ActionReport / AllActionsReport
-│   ├── report.py            # Renders reports as console text / JSON / HTML
+│   ├── report.py            # Renders action reports as console text / JSON / HTML
+│   ├── insights_explorer.py # Turns raw insights into a CapabilitiesReport
+│   ├── capabilities_report.py  # Renders CapabilitiesReport as console/JSON/HTML
 │   └── video_annotator.py   # Burns overlays into video frames (OpenCV + ffmpeg)
 ├── tests/                   # Unit tests (no live Azure account required)
 ├── input/                   # Your local video files (gitignored)
@@ -594,6 +611,111 @@ Unlike Recipe B, this can't accidentally pick up a non-composite match —
 it filters strictly on `source == "derived"`, so the overlay only ever
 shows actions actually synthesized by `COMPOSITE_ACTIONS`, across however
 many composite types the video contains at once.
+
+## Showcasing every other capability: explore_insights.py
+
+`main.py`, `detect_all_actions.py`, and `annotate_video.py` are all built
+around one slice of Video Indexer's output: `labels`/`keywords`/
+`detectedObjects`/`ocr`, plus the `derived` composites built on top of them.
+That's deliberate — it's what "detect an action" needs — but Video Indexer's
+insights payload carries a lot more than that. `explore_insights.py` is a
+separate CLI that showcases everything the action-focused trio doesn't
+touch:
+
+```bash
+python explore_insights.py --video interview_clip.mp4
+```
+
+It uses the same upload/auth/polling client as the other three scripts (so
+`--video-id`, `-v`, `--check-auth`, and `--save-raw-insights` all work the
+same way), then extracts and reports:
+
+- **Faces** — recognized/unrecognized people Video Indexer detected, with
+  confidence and appearance counts.
+- **Transcript, speakers, and source language** — the spoken-word
+  transcript, broken into timestamped lines, each attributed to a speaker
+  ID when Video Indexer could tell speakers apart.
+- **Topics** — subjects the video is "about," drawn from Video Indexer's
+  IPTC-based topic taxonomy (e.g. "Technology (technology and computing)").
+- **Named entities** — brands, locations, and people mentioned or shown,
+  merged from Video Indexer's three separate `brands`/`namedLocations`/
+  `namedPeople` buckets into one list.
+- **Sentiments** — Positive/Neutral/Negative spans with an average score.
+- **Emotions** — Joy/Sadness/Anger/Fear/Surprise spans, reported separately
+  from sentiment (Video Indexer scores these as two distinct insights, not
+  one).
+- **Audio effects** — Speech/Music/Silence/Crowd/ApplauseAndCheering, etc.
+- **Shots** — scene-cut boundaries, each with its key-frame count.
+- **Content moderation** — visual adult/racy scores and a banned-words
+  count/ratio from the transcript.
+
+Unlike the other three scripts, this one defaults `--indexing-preset` to
+`Advanced`, not `Default` — almost everything above (topics, named
+entities, sentiments, emotions, audio effects, and the person-count data
+`--require-single-person` elsewhere relies on) is Advanced-only or
+meaningfully richer under Advanced. Faces and transcript are the two
+exceptions that work under `Default` too.
+
+Outputs land in `./output/`:
+
+- `<video>.capabilities.json` — every extracted field, machine-readable.
+- `<video>.capabilities.html` — open in a browser for a scorecard (how many
+  of each signal were found) plus a per-capability section (a face table,
+  the transcript with speaker labels, topic/entity pill lists, sentiment
+  and audio-effect tables, a shot list, and the moderation scores).
+
+Like the rest of this project, every extractor here is written defensively:
+Video Indexer's less-common field shapes (in particular, whether
+`namedPeople` items carry `appearances[]` or `instances[]`, and details of
+the `brands`/`namedLocations` shapes) weren't independently confirmed
+against a real payload the way the action-focused buckets were, so
+`insights_explorer.py` tries the documented/most-likely field name first,
+falls back to a plausible alternate, and never raises on missing or
+malformed data — an insight bucket that isn't present (e.g. no `emotions`
+in a `Default`-preset video) just reports zero of that signal rather than
+erroring out.
+
+### What to test it with
+
+Every capability above depends on the video actually containing that kind
+of content — a silent security-camera clip (like this project's own
+`cashier.raw_insights.json` sample) will come back with faces (if anyone's
+in frame) and shots, but empty transcript/topics/entities/sentiments/
+emotions/audio-effects, since there's no speech or narrative content to
+find. There's no single official Microsoft sample video built to exercise
+every one of these insights at once, so the most reliable way to see all of
+them populated is to record (or find) a short clip — under a minute is
+plenty — that includes:
+
+- **At least one visible face**, ideally on camera for a few consecutive
+  seconds (exercises **faces**).
+- **Someone speaking**, in a clip long enough for a few sentences
+  (exercises **transcript**, **speakers** if more than one person talks,
+  and **source language** detection).
+- **A brand name, a place name, or a well-known person's name** — said
+  out loud or shown on screen (a product, a storefront sign, a company
+  logo) — to exercise **named entities**. Mentioning a public figure,
+  a city, and a company name in the same clip is an easy way to populate
+  all three entity types (`namedPeople`/`namedLocations`/`brands`) at once.
+  Anthropic's Claude line is a real-world example.
+- **A clear emotional tone** in the speech or dialogue — a script the
+  transcript's `sentiments`/`emotions` insights can pick something out of
+  (e.g. an enthusiastic product pitch for Positive/Joy, or a complaint for
+  Negative). A flat, neutral reading narration will still process fine but
+  is less interesting to look at in the report.
+- **A scene cut or two** (a cut to a different shot, a change of camera
+  angle) to get more than one row in **shots**.
+- **Some background sound** — music, applause, crowd noise, or just talking
+  — to populate **audio effects** with something other than `Silence`.
+- **Nothing NSFW or containing banned words**, unless you're specifically
+  testing that the **content moderation** scores stay low on clean content
+  (a positive/negative test is easier to reason about than trying to
+  synthesize something that trips the flag).
+
+Run it with `--indexing-preset Advanced --save-raw-insights` the first
+time against a new clip — the saved `<video>.raw_insights.json` is the
+fastest way to see exactly what Video Indexer returned if any section of
+the `.capabilities.html` report comes back emptier than expected.
 
 ## Running the tests
 

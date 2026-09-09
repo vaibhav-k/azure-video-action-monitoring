@@ -254,8 +254,11 @@ def test_build_session_retries_transient_status_codes():
 
     assert retry.total == 4
     assert set(retry.status_forcelist) == {429, 500, 502, 503, 504}
-    assert "POST" in retry.allowed_methods
     assert "GET" in retry.allowed_methods
+    # POST is deliberately excluded: upload_video's POST isn't idempotent,
+    # so an automatic retry could re-upload the same file. See
+    # _build_session's docstring in src/video_indexer_client.py.
+    assert "POST" not in retry.allowed_methods
 
 
 # ----------------------------------------------------------------------
