@@ -39,15 +39,16 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .config import Settings
-from .constants import (
-    ARM_API_VERSION,
-    ARM_BASE_URL,
-    DATA_PLANE_BASE_URL,
-    STATE_FAILED,
-    STATE_PROCESSED,
-)
 
 logger = logging.getLogger(__name__)
+
+ARM_BASE_URL = "https://management.azure.com"
+ARM_API_VERSION = "2025-04-01"
+DATA_PLANE_BASE_URL = "https://api.videoindexer.ai"
+
+# Terminal states reported by the Video Indexer processing pipeline.
+STATE_PROCESSED = "Processed"
+STATE_FAILED = "Failed"
 
 
 class VideoIndexerError(RuntimeError):
@@ -71,18 +72,30 @@ class ProcessingTimeoutError(VideoIndexerError):
 
 
 def _build_session(total_retries: int = 4) -> requests.Session:
-    """A requests.Session with sane retry/backoff for transient failures."""
+    """A requests.Session with sane retry/backoff for transient failures.
+
+    Only GET is retried automatically. POST is deliberately excluded: the one
+    POST this project makes through this session that matters,
+    `upload_video`, is not idempotent -- if the request reaches Video Indexer
+    but the response is lost to a transient network blip, an automatic retry
+    would re-POST the same file and could create a duplicate upload (billed
+    twice, and requiring a --name change to work around VIDEO_ALREADY_FAILED
+    on the retry). `generateAccessToken` is also a POST but is safely
+    idempotent (minting a second token is harmless) -- it just doesn't get
+    the retry/backoff benefit either, which is an acceptable tradeoff to keep
+    this one Retry policy simple and unambiguous about `upload_video`.
+    """
     session = requests.Session()
     retry = Retry(
         total=total_retries,
         backoff_factor=1.5,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET", "POST"),
+        allowed_methods=("GET",),
         raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
-    session.mount("http://", adapter)  # noqa: S5332
+    session.mount("http://", adapter)
     return session
 
 

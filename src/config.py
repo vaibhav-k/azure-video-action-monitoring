@@ -25,21 +25,24 @@ class ConfigError(RuntimeError):
 
 
 def _parse_positive_float(env_var: str, default: float) -> float:
-    """Read `env_var` as a positive float, falling back to `default` when
-    unset. Raises ConfigError (rather than letting a raw ValueError escape)
-    when the value is present but not a valid positive number."""
-    raw = os.environ.get(env_var)
-    if raw is None or not raw.strip():
+    """Parse an optional numeric override, falling back to `default` when
+    the env var is unset or blank (e.g. an empty .env line), and raising
+    ConfigError -- not a raw ValueError, which callers of from_env() don't
+    expect to handle -- for a malformed or non-positive value. A timeout or
+    poll interval of zero or less would either spin-loop or never poll at
+    all, so both are rejected here rather than only being malformed."""
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
         return default
     try:
         value = float(raw)
     except ValueError as exc:
         raise ConfigError(
-            f"Environment variable {env_var} must be a number, got {raw!r}."
+            f"{env_var} must be a positive number of seconds, got: {raw!r}"
         ) from exc
     if value <= 0:
         raise ConfigError(
-            f"Environment variable {env_var} must be positive, got {value}."
+            f"{env_var} must be a positive number of seconds, got: {raw!r}"
         )
     return value
 
@@ -82,8 +85,10 @@ class Settings:
                 "Video Indexer account details, or export them in your shell."
             )
 
-        poll_interval = _parse_positive_float("AVI_POLL_INTERVAL_SECONDS", 10.0)
-        timeout = _parse_positive_float("AVI_PROCESSING_TIMEOUT_SECONDS", 1800.0)
+        poll_interval = _parse_positive_float("AVI_POLL_INTERVAL_SECONDS", default=10.0)
+        timeout = _parse_positive_float(
+            "AVI_PROCESSING_TIMEOUT_SECONDS", default=1800.0
+        )
 
         return Settings(
             subscription_id=values["subscription_id"],

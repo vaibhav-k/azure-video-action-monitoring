@@ -209,8 +209,21 @@ def _extract_insights(index_payload: dict[str, Any]) -> dict[str, Any]:
 def _video_duration_seconds(
     index_payload: dict[str, Any], insights: dict[str, Any]
 ) -> float | None:
-    """Best-effort extraction of the video's total duration, in seconds."""
-    duration = insights.get("duration") or index_payload.get("durationInSeconds")
+    """Best-effort extraction of the video's total duration, in seconds.
+
+    `insights.duration` is tried first, with `durationInSeconds` (a plain
+    top-level number) as the fallback when it's absent or unparseable.
+    Real Video Indexer responses have consistently returned
+    insights.duration as a plain "H:MM:SS.ff" string (confirmed against
+    this project's own raw insights captures, e.g.
+    output/dollar_calendar_phone.raw_insights.json's "0:00:12.64") -- the
+    previous version of this function only handled a
+    `{"seconds": ...}`/`{"time": ...}` dict or a bare number, so it
+    silently returned None for that actual common case, which in turn
+    disabled every HTML report's timeline (write_html/write_html_all treat
+    an unknown duration as "nothing to position bars against").
+    """
+    duration = insights.get("duration")
     if isinstance(duration, dict):
         # Some responses nest as {"time": "HH:MM:SS.fff", "seconds": ...}
         duration_dict = cast("dict[str, Any]", duration)
@@ -218,9 +231,16 @@ def _video_duration_seconds(
             return float(duration_dict["seconds"])
         if "time" in duration_dict:
             return _timestamp_to_seconds(duration_dict["time"])
-    if isinstance(duration, (int, float)):
+    elif isinstance(duration, (int, float)):
         return float(duration)
-    return None
+    elif isinstance(duration, str) and duration:
+        try:
+            return _timestamp_to_seconds(duration)
+        except (TypeError, ValueError):
+            pass
+
+    fallback = index_payload.get("durationInSeconds")
+    return float(fallback) if isinstance(fallback, (int, float)) else None
 
 
 def _matches(term: str, needles: Iterable[str]) -> bool:

@@ -19,6 +19,7 @@ from src.action_analyzer import (
     _people_in_frame_count,
     _temporal_iou,
     _video_dimensions,
+    _video_duration_seconds,
     analyze,
     analyze_all,
 )
@@ -629,6 +630,42 @@ def test_video_dimensions_none_when_missing_or_invalid():
     assert _video_dimensions({"videos": [{"insights": {}}]}) is None
     assert _video_dimensions({"videos": [{"width": 0, "height": 240}]}) is None
     assert _video_dimensions({}) is None
+
+
+def test_video_duration_seconds_parses_real_plain_string_format():
+    # Real Video Indexer responses report insights.duration as a plain
+    # "H:MM:SS.ff" string, not the {"seconds": ...} dict shape -- confirmed
+    # against this project's own output/dollar_calendar_phone.raw_insights.json.
+    # A prior version of this function only handled the dict/numeric shapes,
+    # so this exact case silently returned None (and disabled every HTML
+    # report's timeline as a result).
+    insights = {"duration": "0:00:12.64"}
+    assert _video_duration_seconds({}, insights) == pytest.approx(12.64)
+
+
+def test_video_duration_seconds_still_supports_dict_shape():
+    insights = {"duration": {"time": "00:00:42.500", "seconds": 42.5}}
+    assert _video_duration_seconds({}, insights) == pytest.approx(42.5)
+
+
+def test_video_duration_seconds_still_supports_numeric_shape():
+    assert _video_duration_seconds({}, {"duration": 12.64}) == pytest.approx(12.64)
+
+
+def test_video_duration_seconds_falls_back_to_top_level_duration_in_seconds():
+    assert _video_duration_seconds({"durationInSeconds": 12}, {}) == pytest.approx(12.0)
+
+
+def test_video_duration_seconds_falls_back_when_string_is_unparseable():
+    index = {"durationInSeconds": 12}
+    assert _video_duration_seconds(
+        index, {"duration": "not a timestamp"}
+    ) == pytest.approx(12.0)
+
+
+def test_video_duration_seconds_none_when_nothing_usable():
+    assert _video_duration_seconds({}, {}) is None
+    assert _video_duration_seconds({}, {"duration": ""}) is None
 
 
 def test_looks_like_ocr_overlay_true_for_small_corner_box():

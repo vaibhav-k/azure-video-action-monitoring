@@ -8,7 +8,7 @@ label/keyword Video Indexer detected -- a full "what happened, and when"
 timeline, grouped by distinct action with per-action counts and durations.
 
 Example:
-    python ./detect_all_actions.py --video ./people_jumping.mp4
+    python detect_all_actions.py --video ./people_jumping.mp4
 
 On first run against a given video, this uploads it to your Azure AI Video
 Indexer account and waits for processing (a few minutes, depending on
@@ -23,11 +23,9 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any
 
 from src.action_analyzer import analyze_all
 from src.config import ConfigError, Settings
-from src.constants import DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS
 from src.report import to_console_text_all, write_html_all, write_json_all
 from src.video_indexer_client import VideoIndexerClient, VideoIndexerError
 
@@ -35,12 +33,6 @@ logger = logging.getLogger("azure_action_monitoring.detect_all_actions")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    """
-    Build the argument parser for the CLI.
-
-    Returns:
-        argparse.ArgumentParser: The configured argument parser.
-    """
     parser = argparse.ArgumentParser(
         description="Detect and report every action Azure AI Video Indexer finds in a video."
     )
@@ -66,17 +58,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip upload and reuse an already-indexed video ID.",
     )
     parser.add_argument(
-        "--indexing-preset",
-        default=None,
-        help="Video Indexer indexing preset to upload with, e.g. 'Advanced' "
-        "for richer object/people insights (default: whatever the account's "
-        "'Default' preset gives you). Only takes effect on a fresh upload -- "
-        "reusing --video-id keeps whatever preset that video was originally "
-        "indexed with. Note this still can't surface a concept absent from "
-        "Video Indexer's label/keyword/object vocabulary entirely (e.g. "
-        "'cash') -- see README Limitations.",
-    )
-    parser.add_argument(
         "--out-dir",
         default=Path("output"),
         type=Path,
@@ -90,44 +71,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "Occurrences with no confidence value are always kept.",
     )
     parser.add_argument(
+        "--indexing-preset",
+        default="Default",
+        choices=["Default", "Advanced"],
+        help="Video Indexer indexing preset to use when uploading a new video "
+        "(ignored when reusing --video-id). 'Advanced' additionally returns "
+        "observedPeople, which --require-single-person needs -- without it, "
+        "--require-single-person silently keeps every composite occurrence "
+        "instead of filtering. Default: Default.",
+    )
+    parser.add_argument(
         "--min-overlap-seconds",
         type=float,
-        default=DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS,
-        help="Drop composite/derived actions (e.g. 'person using phone') whose "
-        f"underlying overlap is shorter than this many seconds -- filters out "
-        f"detector jitter. Default: {DEFAULT_MIN_COMPOSITE_OVERLAP_SECONDS}. "
-        "Pass 0 to keep every overlap regardless of length.",
+        default=None,
+        help="Drop composite ('derived') action overlaps shorter than this "
+        "many seconds (a 1-2 frame overlap is usually detector jitter, not a "
+        "real co-occurrence). Unfiltered by default.",
     )
     parser.add_argument(
         "--merge-gap-seconds",
         type=float,
         default=None,
-        help="Merge occurrences of the same action within this many seconds "
-        "of each other (or overlapping) into one combined occurrence. Off by "
-        "default (every occurrence reported separately); try e.g. 1.0 to "
-        "collapse fragmented detections into fewer, more meaningful spans.",
+        help="Collapse occurrences of the same action within this many "
+        "seconds of each other (or overlapping) into one continuous "
+        "occurrence, instead of several fragmented rows.",
     )
     parser.add_argument(
         "--min-temporal-iou",
         type=float,
         default=None,
-        help="Drop a composite/derived action whose temporal "
-        "Intersection-over-Union (overlap duration / combined duration of "
-        "the two contributing detections) is below this (0.0-1.0). A time-"
-        "domain proxy for 'these detections' durations line up closely', "
-        "not spatial evidence -- see README 'Composite (derived) actions'. "
-        "Off by default.",
+        help="Drop composite overlaps whose temporal Intersection-over-Union "
+        "is below this (0.0-1.0) -- a stricter proxy than --min-overlap-"
+        "seconds alone for 'these two detections describe the same event'.",
     )
     parser.add_argument(
         "--require-single-person",
         action="store_true",
-        help="Only keep a composite/derived action from a moment where "
-        "exactly one person was tracked in frame (needs 'observedPeople' "
-        "data, i.e. an --indexing-preset Advanced video) -- drops "
-        "occurrences with 0 or 2+ people tracked, since those remain "
-        "genuinely ambiguous about which person the action belongs to. "
-        "Off by default; silently has no effect if observedPeople data "
-        "isn't available.",
+        help="Only keep composite occurrences where observedPeople (Advanced "
+        "preset only -- see --indexing-preset) tracked exactly one person in "
+        "frame during the overlap. Has no effect if that data isn't available.",
     )
     parser.add_argument(
         "--save-raw-insights",
@@ -141,13 +123,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> str | None:
-    """
-    Return a human-readable error message if `args` fail validation
-    (beyond what argparse itself enforces), or None if they're all fine.
-    Kept separate from `main` so each check is one flat, easily-testable
-    statement rather than nested inside a long function body.
-    """
-    if not args.video and not args.video_id:
+    """Validate parsed args, returning a human-readable error message, or
+    None if they're valid. Split out from main() so this (the least
+    exciting but most bug-prone part of the CLI) is directly unit-testable
+    without spinning up Settings/VideoIndexerClient."""
+    if not args.check_auth and not args.video and not args.video_id:
         return (
             "Either --video (to upload) or --video-id (to reuse an already-"
             "indexed video) is required, unless using --check-auth."
@@ -156,87 +136,26 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         return f"Video file not found: {args.video}"
     if args.min_confidence is not None and not (0.0 <= args.min_confidence <= 1.0):
         return "--min-confidence must be between 0.0 and 1.0."
-    if args.min_overlap_seconds < 0:
+    if args.min_overlap_seconds is not None and args.min_overlap_seconds < 0:
         return "--min-overlap-seconds must be >= 0."
-    if args.merge_gap_seconds is not None and args.merge_gap_seconds < 0:
-        return "--merge-gap-seconds must be >= 0."
     if args.min_temporal_iou is not None and not (0.0 <= args.min_temporal_iou <= 1.0):
         return "--min-temporal-iou must be between 0.0 and 1.0."
+    if args.merge_gap_seconds is not None and args.merge_gap_seconds < 0:
+        return "--merge-gap-seconds must be >= 0."
     return None
 
 
-def _run_check_auth(client: VideoIndexerClient, settings: Settings) -> int:
-    """
-    Handle `--check-auth`: verify Azure auth + account access, with no
-    upload, and return the process's exit code.
-
-    Args:
-        client: The video indexer client.
-        settings: The Azure account settings.
-    """
-    logger.info(
-        "Checking auth against subscription=%s resource_group=%s account_name=%s location=%s ...",
-        settings.subscription_id,
-        settings.resource_group,
-        settings.account_name,
-        settings.location,
-    )
-    try:
-        client.get_access_token()
-    except VideoIndexerError as exc:
-        logger.error(exc)
-        return 1
-    logger.info(
-        "Success: obtained a Video Indexer access token. Config and permissions look good."
-    )
-    return 0
-
-
-def _acquire_index(
-    client: VideoIndexerClient, args: argparse.Namespace
-) -> dict[str, Any]:
-    """
-    Get the video's Video Indexer insights index -- either by reusing
-    `--video-id` as-is, or by uploading `--video` and waiting for
-    processing. Raises `VideoIndexerError` on failure; left for `main` to
-    turn into a clean exit code rather than a traceback.
-
-    Args:
-        client: The video indexer client.
-        args: The parsed command line arguments.
-    """
-    if args.video_id:
-        logger.info("Reusing existing video id=%s", args.video_id)
-        return client.wait_for_processing(args.video_id)
-
-    video_id = client.upload_video(
-        args.video,
-        name=args.name,
-        indexing_preset=args.indexing_preset or "Default",
-    )
-    logger.info(
-        "Video uploaded (id=%s). Save this ID to re-run analysis "
-        "without re-uploading via --video-id.",
-        video_id,
-    )
-    return client.wait_for_processing(video_id)
-
-
 def main(argv: list[str] | None = None) -> int:
-    """
-    Main entry point for the CLI.
-
-    Args:
-        argv (list[str] | None): Command-line arguments. If None, uses sys.argv.
-
-    Returns:
-        int: Exit code.
-    """
     args = build_arg_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
+
+    error = _validate_args(args)
+    if error:
+        logger.error(error)
+        return 2
 
     try:
         settings = Settings.from_env()
@@ -247,12 +166,22 @@ def main(argv: list[str] | None = None) -> int:
     client = VideoIndexerClient(settings)
 
     if args.check_auth:
-        return _run_check_auth(client, settings)
-
-    error = _validate_args(args)
-    if error:
-        logger.error(error)
-        return 2
+        logger.info(
+            "Checking auth against subscription=%s resource_group=%s account_name=%s location=%s ...",
+            settings.subscription_id,
+            settings.resource_group,
+            settings.account_name,
+            settings.location,
+        )
+        try:
+            client.get_access_token()
+        except VideoIndexerError as exc:
+            logger.error(str(exc))
+            return 1
+        logger.info(
+            "Success: obtained a Video Indexer access token. Config and permissions look good."
+        )
+        return 0
 
     # Base name used for both the Video Indexer upload label and the output
     # filenames. Prefer the local video's filename; fall back to --name or
@@ -264,7 +193,20 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        index = _acquire_index(client, args)
+        if args.video_id:
+            logger.info("Reusing existing video id=%s", args.video_id)
+            index = client.wait_for_processing(args.video_id)
+        else:
+            video_id = client.upload_video(
+                args.video, name=args.name, indexing_preset=args.indexing_preset
+            )
+            logger.info(
+                "Video uploaded (id=%s, preset=%s). Save this ID to re-run "
+                "analysis without re-uploading via --video-id.",
+                video_id,
+                args.indexing_preset,
+            )
+            index = client.wait_for_processing(video_id)
     except VideoIndexerError as exc:
         logger.error("Video Indexer processing failed: %s", exc)
         return 1
