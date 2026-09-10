@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import requests
 from azure.core.exceptions import ClientAuthenticationError
@@ -39,16 +39,15 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .config import Settings
+from .constants import (
+    ARM_API_VERSION,
+    ARM_BASE_URL,
+    DATA_PLANE_BASE_URL,
+    STATE_FAILED,
+    STATE_PROCESSED,
+)
 
 logger = logging.getLogger(__name__)
-
-ARM_BASE_URL = "https://management.azure.com"
-ARM_API_VERSION = "2025-04-01"
-DATA_PLANE_BASE_URL = "https://api.videoindexer.ai"
-
-# Terminal states reported by the Video Indexer processing pipeline.
-STATE_PROCESSED = "Processed"
-STATE_FAILED = "Failed"
 
 
 class VideoIndexerError(RuntimeError):
@@ -69,6 +68,36 @@ class ProcessingFailedError(VideoIndexerError):
 
 class ProcessingTimeoutError(VideoIndexerError):
     """Raised when processing does not complete within the configured timeout."""
+
+
+class _HttpSession(Protocol):
+    """The subset of requests.Session's interface this client actually
+    calls (get/post with the specific keyword arguments used below) --
+    accepting this instead of the concrete `requests.Session` type lets
+    tests pass a hand-rolled FakeSession double without it needing to
+    subclass or fully replicate requests.Session's real surface, while
+    still keeping this constructor's real default (`_build_session()`,
+    a genuine `requests.Session`) fully type-checked."""
+
+    def get(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout: int | None = None,
+        stream: bool | None = None,
+    ) -> Any: ...
+
+    def post(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        headers: dict[str, Any] | None = None,
+        timeout: int | None = None,
+    ) -> Any: ...
 
 
 def _build_session(total_retries: int = 4) -> requests.Session:
@@ -102,9 +131,11 @@ def _build_session(total_retries: int = 4) -> requests.Session:
 class VideoIndexerClient:
     """Client for uploading videos and retrieving insights from Video Indexer."""
 
-    def __init__(self, settings: Settings, session: requests.Session | None = None):
+    def __init__(self, settings: Settings, session: _HttpSession | None = None):
         self._settings = settings
-        self._session = session or _build_session()
+        self._session: _HttpSession = (
+            session if session is not None else _build_session()
+        )
         self._credential = DefaultAzureCredential()
         self._vi_access_token: str | None = None
 
@@ -365,6 +396,38 @@ class VideoIndexerClient:
             raise VideoIndexerError(f"Downloaded source video for {video_id} is empty.")
         logger.info("Downloaded source video (%d bytes)", size)
         return dest_path
+
+    # ------------------------------------------------------------------
+    # Thumbnails (faces, keyframes, etc.)
+    # ------------------------------------------------------------------
+    def get_video_thumbnail(
+        self, video_id: str, thumbnail_id: str, format_: str = "Jpeg"
+    ) -> bytes:
+        """Download one thumbnail image Video Indexer generated for
+        `video_id`, as raw JPEG bytes. `thumbnail_id` comes from a
+        faces/shots/etc. item's `thumbnailId` field (see
+        insights_explorer.FaceInsight.thumbnail_id) -- used by
+        explore_insights.py's --save-face-thumbnails so a reviewer can
+        visually confirm whether two "Unknown #N" face entries are actually
+        the same person. Video Indexer has no facial-recognition
+        re-identification for unregistered faces, so its short-term visual
+        tracking can split one real person into multiple "Unknown" entries
+        if tracking drops (a head turn, occlusion, leaving and re-entering
+        frame) -- the thumbnail image is the only way to tell from this
+        client alone."""
+        token = self._ensure_token()
+        url = (
+            f"{DATA_PLANE_BASE_URL}/{self._settings.location}/Accounts/"
+            f"{self._settings.account_id}/Videos/{video_id}/Thumbnails/{thumbnail_id}"
+        )
+        response = self._session.get(
+            url, params={"accessToken": token, "format": format_}, timeout=30
+        )
+        if not response.ok:
+            raise VideoIndexerError(
+                f"Get thumbnail failed ({response.status_code}): {response.text}"
+            )
+        return response.content
 
     # ------------------------------------------------------------------
     # Convenience

@@ -289,7 +289,7 @@ def _person_and_cell_phone_index(phone_start: str, phone_end: str) -> dict[str, 
     }
 
 
-def test_analyze_all_min_overlap_seconds_drops_short_overlaps():
+def test_analyze_all_min_overlap_seconds_drops_short_overlaps() -> None:
     # A 0.05s overlap is the kind of single-frame detector blip
     # min_overlap_seconds exists to filter -- e.g. the real 0.04s
     # "person using phone" occurrence seen in this project's own captured
@@ -303,7 +303,7 @@ def test_analyze_all_min_overlap_seconds_drops_short_overlaps():
     assert not [a for a in filtered.actions if a.source == "derived"]
 
 
-def test_analyze_all_min_overlap_seconds_keeps_long_enough_overlaps():
+def test_analyze_all_min_overlap_seconds_keeps_long_enough_overlaps() -> None:
     index = _person_and_cell_phone_index("0:00:03", "0:00:06")
 
     report = analyze_all(index, min_overlap_seconds=0.15)
@@ -313,7 +313,7 @@ def test_analyze_all_min_overlap_seconds_keeps_long_enough_overlaps():
     assert derived[0].name == "person using phone"
 
 
-def test_analyze_all_derives_person_handling_cash_from_ocr_overlap():
+def test_analyze_all_derives_person_handling_cash_from_ocr_overlap() -> None:
     # "person handling cash" has no exact-name match target on its right
     # side -- it's derived via CompositeSide.synonyms, matching the same
     # cash-related phrases as DEFAULT_SYNONYMS["cash"] against OCR text,
@@ -406,7 +406,7 @@ def test_analyze_all_merge_gap_seconds_merges_nearby_occurrences(
     assert len(not_merged.actions) == 2
 
 
-def test_analyze_all_min_temporal_iou_and_require_single_person():
+def test_analyze_all_min_temporal_iou_and_require_single_person() -> None:
     # Same person+phone shape used in test_action_analyzer.py's analyze()
     # tests, exercised here through analyze_all() for parity: both new
     # opt-in filters must reach the "all actions" path too, not just the

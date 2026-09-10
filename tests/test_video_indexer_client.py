@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from azure.core.exceptions import ClientAuthenticationError
+from requests.adapters import HTTPAdapter
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -43,12 +44,14 @@ class FakeResponse:
         json_data: Any = None,
         text: str = "",
         chunks: list[bytes] | None = None,
+        content: bytes = b"",
     ):
         self.status_code = status_code
         self.ok = 200 <= status_code < 300
         self._json = json_data
         self.text = text
         self._chunks = chunks or []
+        self.content = content
 
     def json(self):
         return self._json
@@ -242,6 +245,33 @@ def test_download_video_raises_on_empty_download(settings: Settings, tmp_path: P
 
 
 # ----------------------------------------------------------------------
+# get_video_thumbnail
+# ----------------------------------------------------------------------
+
+
+def test_get_video_thumbnail_returns_raw_bytes(settings: Settings):
+    session = FakeSession(
+        {"Thumbnails/thumb-1": FakeResponse(content=b"\xff\xd8fake-jpeg-bytes")}
+    )
+    client = _client_with_token(settings, session)
+
+    image_bytes = client.get_video_thumbnail("video-123", "thumb-1")
+
+    assert image_bytes == b"\xff\xd8fake-jpeg-bytes"
+    assert any("video-123/Thumbnails/thumb-1" in u for u in session.requested_urls)
+
+
+def test_get_video_thumbnail_raises_on_failure(settings: Settings):
+    session = FakeSession(
+        {"Thumbnails/missing": FakeResponse(status_code=404, text="not found")}
+    )
+    client = _client_with_token(settings, session)
+
+    with pytest.raises(VideoIndexerError):
+        client.get_video_thumbnail("video-123", "missing")
+
+
+# ----------------------------------------------------------------------
 # _build_session
 # ----------------------------------------------------------------------
 
@@ -250,10 +280,18 @@ def test_build_session_retries_transient_status_codes():
     session = _build_session(total_retries=4)
 
     adapter = session.get_adapter("https://api.videoindexer.ai/")
+    # get_adapter()'s declared return type is the base, adapter-agnostic
+    # BaseAdapter -- narrow to the concrete HTTPAdapter _build_session()
+    # actually mounts so the type checker can see .max_retries.
+    assert isinstance(adapter, HTTPAdapter)
     retry = adapter.max_retries
 
     assert retry.total == 4
     assert set(retry.status_forcelist) == {429, 500, 502, 503, 504}
+    # allowed_methods is typed Collection[str] | None upstream (None would
+    # mean "retry every method") -- _build_session always passes an
+    # explicit tuple, never None, so this narrows that for the checker.
+    assert retry.allowed_methods is not None
     assert "GET" in retry.allowed_methods
     # POST is deliberately excluded: upload_video's POST isn't idempotent,
     # so an automatic retry could re-upload the same file. See

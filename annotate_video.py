@@ -31,6 +31,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Protocol
 
 from src.action_analyzer import DetectedAction, analyze_all
 from src.config import ConfigError, Settings
@@ -247,8 +248,19 @@ def _build_client_if_needed(args: argparse.Namespace) -> VideoIndexerClient | No
     return VideoIndexerClient(settings)
 
 
+class _DownloadsVideo(Protocol):
+    """The one VideoIndexerClient method this function actually calls --
+    accepting this instead of the concrete `VideoIndexerClient` type lets
+    tests pass a hand-rolled FakeVideoIndexerClient double without it
+    needing to subclass or fully replicate VideoIndexerClient's real
+    surface, while `main()`'s real `client: VideoIndexerClient | None` is
+    still fully type-checked at every other call site."""
+
+    def download_video(self, video_id: str, dest_path: Path) -> Path: ...
+
+
 def _resolve_frame_source(
-    client: VideoIndexerClient | None, args: argparse.Namespace
+    client: _DownloadsVideo | None, args: argparse.Namespace
 ) -> Path:
     """The video file to read frames from: the local --video if given,
     otherwise --video-id's source file downloaded from Video Indexer."""

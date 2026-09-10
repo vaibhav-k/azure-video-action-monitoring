@@ -26,7 +26,7 @@ FAKE_SETTINGS = Settings(
     location="eastus",
 )
 
-SAMPLE_INDEX: dict[str, Any] = {
+SAMPLE_INDEX: dict[str, list[dict[str, dict[str, object]]]] = {
     "videos": [
         {
             "insights": {
@@ -46,8 +46,21 @@ SAMPLE_INDEX: dict[str, Any] = {
 
 
 class FakeVideoIndexerClient:
-    """Stands in for VideoIndexerClient: canned results/errors per method,
-    plus a record of how each was called so tests can assert on it."""
+    """
+    Stands in for VideoIndexerClient: canned results/errors per method,
+    plus a record of how each was called so tests can assert on it.
+
+    Attributes:
+        settings: The settings used to initialize the client.
+        _access_token_error: Optional error to raise when get_access_token is called.
+        _index: The fake index to return from wait_for_processing.
+        _wait_for_processing_error: Optional error to raise when wait_for_processing is called.
+        uploaded_video_id: The fake video ID to return from upload_video.
+        _thumbnail_error: Optional error to raise when get_video_thumbnail is called.
+        upload_calls: Record of calls to upload_video.
+        wait_for_processing_calls: Record of calls to wait_for_processing.
+        thumbnail_calls: Record of calls to get_video_thumbnail.
+    """
 
     def __init__(
         self,
@@ -57,14 +70,17 @@ class FakeVideoIndexerClient:
         index: dict[str, Any] | None = None,
         wait_for_processing_error: Exception | None = None,
         uploaded_video_id: str = "uploaded-id",
+        thumbnail_error: Exception | None = None,
     ):
         self.settings = settings
         self._access_token_error = access_token_error
         self._index = index if index is not None else {}
         self._wait_for_processing_error = wait_for_processing_error
         self.uploaded_video_id = uploaded_video_id
+        self._thumbnail_error = thumbnail_error
         self.upload_calls: list[tuple[Any, str | None, str]] = []
         self.wait_for_processing_calls: list[str] = []
+        self.thumbnail_calls: list[tuple[str, str]] = []
 
     def get_access_token(self) -> str:
         if self._access_token_error:
@@ -85,6 +101,12 @@ class FakeVideoIndexerClient:
         if self._wait_for_processing_error:
             raise self._wait_for_processing_error
         return self._index
+
+    def get_video_thumbnail(self, video_id: str, thumbnail_id: str) -> bytes:
+        self.thumbnail_calls.append((video_id, thumbnail_id))
+        if self._thumbnail_error:
+            raise self._thumbnail_error
+        return b"\xff\xd8fake-jpeg-bytes"
 
 
 @pytest.fixture(autouse=True)
@@ -225,6 +247,110 @@ def test_main_returns_1_when_processing_fails(
     )
 
     assert exit_code == 1
+
+
+def test_main_save_face_thumbnails_writes_one_file_per_face(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    index_with_two_faces: dict[str, list[dict[str, dict[str, object]]]] = {
+        "videos": [
+            {
+                "insights": {
+                    "duration": "0:00:30.0",
+                    "faces": [
+                        {
+                            "name": "Jane Doe",
+                            "confidence": 0.9,
+                            "thumbnailId": "thumb-recognized",
+                            "instances": [{"start": "0:00:01.0", "end": "0:00:02.0"}],
+                        },
+                        {
+                            "name": "Unknown #1",
+                            "thumbnailId": "thumb-unknown",
+                            "instances": [{"start": "0:00:05.0", "end": "0:00:06.0"}],
+                        },
+                    ],
+                }
+            }
+        ]
+    }
+    fake = _install_fake_client(monkeypatch, index=index_with_two_faces)
+
+    exit_code = explore_insights.main(
+        [
+            "--video-id",
+            "abc123",
+            "--out-dir",
+            str(tmp_path),
+            "--save-face-thumbnails",
+        ]
+    )
+
+    assert exit_code == 0
+    assert sorted(fake.thumbnail_calls) == [
+        ("abc123", "thumb-recognized"),
+        ("abc123", "thumb-unknown"),
+    ]
+    faces_dir = tmp_path / "abc123.faces"
+    saved_files = sorted(p.name for p in faces_dir.iterdir())
+    assert saved_files == ["Jane_Doe_0.jpg", "Unknown_1_1.jpg"]
+    assert (faces_dir / "Jane_Doe_0.jpg").read_bytes() == b"\xff\xd8fake-jpeg-bytes"
+
+
+def test_main_save_face_thumbnails_noop_without_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    fake = _install_fake_client(monkeypatch, index=SAMPLE_INDEX)
+
+    exit_code = explore_insights.main(
+        ["--video-id", "abc123", "--out-dir", str(tmp_path)]
+    )
+
+    assert exit_code == 0
+    assert fake.thumbnail_calls == []
+    assert not (tmp_path / "abc123.faces").exists()
+
+
+def test_main_save_face_thumbnails_survives_per_face_download_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    index_with_thumbnail: dict[str, list[dict[str, dict[str, object]]]] = {
+        "videos": [
+            {
+                "insights": {
+                    "duration": "0:00:30.0",
+                    "faces": [
+                        {
+                            "name": "Jane Doe",
+                            "confidence": 0.9,
+                            "thumbnailId": "thumb-1",
+                            "instances": [{"start": "0:00:01.0", "end": "0:00:02.0"}],
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    fake = _install_fake_client(
+        monkeypatch,
+        index=index_with_thumbnail,
+        thumbnail_error=VideoIndexerError("thumbnail service unavailable"),
+    )
+
+    exit_code = explore_insights.main(
+        [
+            "--video-id",
+            "abc123",
+            "--out-dir",
+            str(tmp_path),
+            "--save-face-thumbnails",
+        ]
+    )
+
+    assert exit_code == 0  # a thumbnail-download failure isn't fatal
+    assert fake.thumbnail_calls == [("abc123", "thumb-1")]  # it was attempted
+    faces_dir = tmp_path / "abc123.faces"
+    assert list(faces_dir.iterdir()) == []  # skipped, not written
 
 
 def test_main_save_raw_insights_writes_raw_json(

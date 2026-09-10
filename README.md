@@ -35,6 +35,7 @@ Built and tested against the sample video `people_jumping.mp4` you provided
   - [Quick recipes: annotated video with composite actions](#quick-recipes-annotated-video-with-composite-actions)
 - [Showcasing every other capability: explore_insights.py](#showcasing-every-other-capability-explore_insightspy)
   - [What to test it with](#what-to-test-it-with)
+- [Describing a video in plain language: analyze_video.py](#describing-a-video-in-plain-language-analyze_videopy)
 - [Running the tests](#running-the-tests)
 - [Troubleshooting: authentication & permissions](#troubleshooting-authentication--permissions)
 - [Limitations & honest caveats](#limitations--honest-caveats)
@@ -91,6 +92,7 @@ azure-video-action-monitoring/
 ├── detect_all_actions.py    # CLI: report every action detected, timestamped
 ├── annotate_video.py        # CLI: burn detected actions into a copy of the video
 ├── explore_insights.py      # CLI: showcase faces/transcript/topics/entities/etc.
+├── analyze_video.py         # CLI: a hedged, plain-language paragraph from VI metadata alone (no model, no frames)
 ├── src/
 │   ├── config.py            # Loads/validates Settings from .env / environment
 │   ├── video_indexer_client.py  # Azure AD auth + Video Indexer upload/poll/fetch
@@ -98,7 +100,8 @@ azure-video-action-monitoring/
 │   ├── report.py            # Renders action reports as console text / JSON / HTML
 │   ├── insights_explorer.py # Turns raw insights into a CapabilitiesReport
 │   ├── capabilities_report.py  # Renders CapabilitiesReport as console/JSON/HTML
-│   └── video_annotator.py   # Burns overlays into video frames (OpenCV + ffmpeg)
+│   ├── video_annotator.py   # Burns overlays into video frames (OpenCV + ffmpeg)
+│   └── scene_summary.py     # Synthesizes analyze_video.py's paragraph from an AllActionsReport
 ├── tests/                   # Unit tests (no live Azure account required)
 ├── input/                   # Your local video files (gitignored)
 ├── output/                  # Generated reports / annotated videos (gitignored)
@@ -118,6 +121,11 @@ azure-video-action-monitoring/
 - `ffmpeg` on `PATH`, optional — only needed by `annotate_video.py` to keep
   the original audio track in the annotated output. Without it, the
   annotated video is still produced, just silent.
+- No LLM, vision model, or Foundry deployment of any kind is needed —
+  `analyze_video.py` builds its paragraph purely from Video Indexer
+  metadata. `analyze_video.py --video-id` needs the same Video Indexer
+  account as everything else here (unless a cached raw insights file is
+  already present); `--metadata` alone needs no Azure account at all.
 
 ## Azure setup (one-time)
 
@@ -631,7 +639,19 @@ It uses the same upload/auth/polling client as the other three scripts (so
 same way), then extracts and reports:
 
 - **Faces** — recognized/unrecognized people Video Indexer detected, with
-  confidence and appearance counts.
+  confidence and the timestamped span(s) each face appeared in. "Recognized"
+  here means Video Indexer matched the face to a known identity (a
+  celebrity, or someone registered in a Person Model on your account) — an
+  unmatched face is named `Unknown #N` with confidence `0`, which is the
+  API's own signal for "detected but not identified," not a parsing issue
+  in this project. Video Indexer has no facial-recognition
+  re-identification for unregistered faces, only short-term visual
+  tracking — so if a person's face tracking drops partway through the video
+  (a head turn, brief occlusion, walking out of frame and back), the same
+  real person can show up as two or more separate `Unknown #N` entries.
+  Pass `--save-face-thumbnails` to download each face's thumbnail image (see
+  below) so you can check this visually instead of guessing from the count
+  alone.
 - **Transcript, speakers, and source language** — the spoken-word
   transcript, broken into timestamped lines, each attributed to a speaker
   ID when Video Indexer could tell speakers apart.
@@ -648,6 +668,31 @@ same way), then extracts and reports:
 - **Shots** — scene-cut boundaries, each with its key-frame count.
 - **Content moderation** — visual adult/racy scores and a banned-words
   count/ratio from the transcript.
+- **Observed people (body tracking)** — a separate model from faces above:
+  it tracks bodies rather than faces, and can stay locked onto one person
+  through a head turn or profile view that breaks face tracking. When your
+  account has it enabled, each observed person also carries **detected
+  clothing** (a garment category and optionally a length, e.g. "sleeve
+  (long)", "skirtAndDress" — coarse by design, no color or style) and,
+  when Video Indexer could confidently link the body to a specific tracked
+  face, a `matched_face_name`. Cross-referencing this against the Faces
+  table by overlapping timing is the most reliable way to tell whether two
+  `Unknown #N` faces are really the same person whose face tracking
+  fragmented — confirmed against a real clip during this project's own
+  testing, where two `Unknown #N` face entries with overlapping timestamps
+  turned out to be one continuously-tracked observed-person body. Microsoft's
+  docs describe detected clothing as requiring a separate Face Recognition
+  approval; whether the testing account this project used already had that
+  approval, or the requirement has since loosened, isn't something we could
+  confirm — either way, its absence on your account just means "not
+  available there," not a bug.
+- **Interaction signals** — a small, hand-curated list of generic labels
+  that name a physical interaction between people (currently: kiss, hug,
+  embrace, handshake, fight, dance). Video Indexer has no dedicated
+  interaction-detection insight — this is just a filtered view of the same
+  `labels`/`keywords` vocabulary every other insight already uses, so treat
+  a hit the same way as any other label-based signal in this project: a
+  lead worth reviewing, not a confirmed claim about what happened.
 
 Unlike the other three scripts, this one defaults `--indexing-preset` to
 `Advanced`, not `Default` — almost everything above (topics, named
@@ -658,11 +703,20 @@ exceptions that work under `Default` too.
 
 Outputs land in `./output/`:
 
-- `<video>.capabilities.json` — every extracted field, machine-readable.
+- `<video>.capabilities.json` — every extracted field, machine-readable
+  (each face includes an `is_recognized` boolean alongside its name/
+  confidence/appearances).
 - `<video>.capabilities.html` — open in a browser for a scorecard (how many
-  of each signal were found) plus a per-capability section (a face table,
-  the transcript with speaker labels, topic/entity pill lists, sentiment
-  and audio-effect tables, a shot list, and the moderation scores).
+  of each signal were found) plus a per-capability section (a face table
+  with a Recognized column and each appearance's timing, the transcript
+  with speaker labels, topic/entity pill lists, sentiment and audio-effect
+  tables, a shot list, and the moderation scores).
+- `<video>.faces/` — only with `--save-face-thumbnails`: one JPEG per
+  detected face (named after the face, e.g. `Jane_Doe_0.jpg` or
+  `Unknown_1_1.jpg`), downloaded from Video Indexer's thumbnail API. This
+  costs one extra API call per face, so it's opt-in rather than automatic.
+  A face with no `thumbnailId` in the payload, or whose individual download
+  fails, is skipped with a warning rather than failing the whole run.
 
 Like the rest of this project, every extractor here is written defensively:
 Video Indexer's less-common field shapes (in particular, whether
@@ -716,6 +770,115 @@ Run it with `--indexing-preset Advanced --save-raw-insights` the first
 time against a new clip — the saved `<video>.raw_insights.json` is the
 fastest way to see exactly what Video Indexer returned if any section of
 the `.capabilities.html` report comes back emptier than expected.
+
+## Describing a video in plain language: analyze_video.py
+
+A fifth CLI that writes a single, hedged, plain-language **paragraph**
+describing what a video's Video Indexer metadata *suggests* might be
+happening in it. Unlike the name might imply, this does **not** inspect the
+video file, sample any frames, or call any LLM/vision model at all — it's
+built entirely from already-computed Video Indexer insights (the same
+label/keyword/object timeline `detect_all_actions.py` reports), filtered by
+a confidence threshold. That makes it fast, free of any model/Foundry
+dependency, and usable the moment you have a `.raw_insights.json` file —
+but it is a fundamentally weaker guarantee than actually watching the
+video: it can only ever repeat what Video Indexer's own classifiers
+flagged, never anything genuinely seen in the footage, and every sentence
+it produces is deliberately hedged for exactly that reason.
+
+```bash
+python analyze_video.py --metadata output/some_clip.raw_insights.json
+```
+
+Minimal example output:
+
+```
+Scene understanding:
+
+This roughly 30-second clip was consistently tagged by Video Indexer's
+labels as outdoor and building, detected persistently throughout. Video
+Indexer's people-tracking identified 3 distinct people appearing across
+the footage. At specific moments, the metadata flags 'kiss' around
+9.8-10.6s; 'street fashion' around 26.6-27.6s -- these are automated label
+guesses, not confirmed events. All of this comes only from Video Indexer's
+automated labels, filtered at a 0.50 confidence threshold, with no image or
+audio actually inspected -- so it should be read as a rough, uncertain
+guess rather than a verified account of what happens in the video.
+```
+
+That block — the `Scene understanding:` line, a blank line, then the
+paragraph — is always the *last* thing printed to stdout, no matter what
+else the script does or saves; everything else (progress, warnings) is
+logged to stderr, so stdout stays safe to pipe or capture programmatically.
+
+### Providing the insights: --metadata / --video-id
+
+Only one of `--metadata` / `--video-id` is required, not both:
+
+- **`--metadata <path>` alone** reads a raw Video Indexer insights export
+  directly — either the live API response, or a `*.raw_insights.json` file
+  saved by `explore_insights.py`/`detect_all_actions.py
+  --save-raw-insights`. No Azure account is needed at all in this mode.
+- **`--video-id <id>` alone** reuses an already-indexed Video Indexer
+  video's own insights: a cached `<out-dir>/<video-id>.raw_insights.json`
+  is reused if one already exists there (no Azure account needed in that
+  case either); otherwise insights are fetched fresh from Video Indexer
+  and then saved to that same path, so the *next* run against the same
+  `--video-id` needs no account access at all.
+- Passing both prefers `--metadata` — it's the more deliberate choice.
+
+```bash
+# From a file already on disk -- no Azure account needed:
+python analyze_video.py --metadata output/c34jzsrlcg.raw_insights.json
+
+# Reuse an already-indexed video (fetches + caches its insights the first
+# time; every run after that reuses the cached file):
+python analyze_video.py --video-id c34jzsrlcg --out-dir output
+```
+
+### Tuning the confidence threshold: --min-confidence
+
+`--min-confidence` (0.0–1.0, default `0.5`) drops any detected
+label/keyword/object whose confidence score is below it before the
+paragraph is built (occurrences with no confidence value at all are always
+kept, since Video Indexer doesn't score every insight bucket) — the same
+flag and semantics as `detect_all_actions.py --min-confidence`. Raising it
+trims out weaker, less certain detections (fewer, more confident sentences);
+lowering it toward `0.0` surfaces everything Video Indexer flagged, however
+uncertain.
+
+```bash
+python analyze_video.py --metadata output/some_clip.raw_insights.json --min-confidence 0.8
+```
+
+Other flags:
+
+- `--output <path>` — also save the paragraph as a plain text file.
+  Optional; the stdout result doesn't depend on this.
+- `--out-dir` — where `--video-id` looks for (and saves) a cached
+  `<video-id>.raw_insights.json`. Default: `./output`.
+
+### How the paragraph gets built
+
+See `src/scene_summary.py`'s module docstring for the full heuristics, but
+in short: rather than hardcoding which label names count as "scene
+setting" vs. "a notable moment" (Video Indexer's label vocabulary is
+effectively open-ended), labels are classified by how much of the video
+they span — a label covering at least half the duration is treated as
+persistent scene-setting context (e.g. "outdoor", "building"); anything
+briefer is a punctual, timestamped moment worth calling out (e.g. "kiss").
+Detected objects are always kept in their own, separately-hedged bucket.
+Person counts come from Video Indexer's `observedPeople` tracking when
+available, falling back to a plain "at least one person is flagged"
+statement otherwise. The whole thing deliberately never infers identity,
+ethnicity, occupation, or relationships (e.g. "a couple") — it names only
+what Video Indexer itself flagged, and always closes by stating the
+confidence threshold used and that this is a guess, not a verified account.
+
+**Requires no LLM, vision model, or Foundry deployment of any kind.**
+`--metadata` alone needs no Azure account either; `--video-id` needs the
+same Azure AI Video Indexer account as the other four scripts, unless a
+cached raw insights file is already present.
 
 ## Running the tests
 
@@ -775,6 +938,13 @@ whether config or access is the problem.
   The extraction/report logic (`action_analyzer.py`, `report.py`) *is*
   fully unit-tested independent of that (see [Running the
   tests](#running-the-tests)).
+- **`analyze_video.py` never actually looks at the video or listens to its
+  audio at all.** Its paragraph is built entirely from Video Indexer's own
+  automated labels/keywords/objects, filtered by `--min-confidence` — it
+  can only ever repeat what those classifiers flagged, never confirm or
+  add anything genuinely observed in the footage. Treat its output as a
+  rough, uncertain guess (it says so explicitly in its own closing
+  sentence), not a verified account of what happens in the video.
 
 ## License
 

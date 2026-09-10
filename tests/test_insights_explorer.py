@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.insights_explorer import analyze_capabilities
+from src.insights_explorer import ClothingItem, analyze_capabilities
 
 SAMPLE_INDEX = {
     "videos": [
@@ -22,6 +22,7 @@ SAMPLE_INDEX = {
                 "sourceLanguage": "en-US",
                 "faces": [
                     {
+                        "id": 1000,
                         "name": "Jane Doe",
                         "confidence": 0.91,
                         "thumbnailId": "thumb-1",
@@ -117,6 +118,80 @@ SAMPLE_INDEX = {
                 "textualContentModeration": [
                     {"bannedWordsCount": 0, "bannedWordsRatio": 0.0}
                 ],
+                "observedPeople": [
+                    {
+                        "id": 1,
+                        "thumbnailId": "op-thumb-1",
+                        "clothing": [
+                            {
+                                "id": 1,
+                                "type": "sleeve",
+                                "properties": {"length": "long"},
+                            }
+                        ],
+                        "matchingFace": {"id": 1000, "confidence": 1.0},
+                        "instances": [{"start": "0:00:00.0", "end": "0:00:05.0"}],
+                    },
+                    {
+                        "id": 2,
+                        "thumbnailId": "op-thumb-2",
+                        "clothing": [
+                            {
+                                "id": 1,
+                                "type": "sleeve",
+                                "properties": {"length": "long"},
+                            },
+                            {"id": 2, "type": "skirtAndDress"},
+                        ],
+                        "instances": [{"start": "0:00:00.0", "end": "0:00:20.0"}],
+                    },
+                ],
+            }
+        }
+    ]
+}
+
+# A separate real-shaped payload for two things the main SAMPLE_INDEX above
+# doesn't cover: textualContentModeration returned as a single dict (not a
+# list -- confirmed against a real account capture, see
+# insights_explorer._first_moderation_item) and an interaction-shaped label
+# ("kiss") with per-instance confidence rather than a top-level one.
+REAL_SHAPED_INDEX = {
+    "videos": [
+        {
+            "insights": {
+                "duration": "0:00:29.6",
+                "labels": [
+                    {
+                        "id": 11,
+                        "name": "kiss",
+                        "instances": [
+                            {
+                                "confidence": 0.9699,
+                                "start": "0:00:09.84",
+                                "end": "0:00:09.88",
+                            },
+                            {
+                                "confidence": 0.9534,
+                                "start": "0:00:10.56",
+                                "end": "0:00:10.6",
+                            },
+                        ],
+                    },
+                    {
+                        "id": 4,
+                        "name": "outdoor",
+                        "instances": [
+                            {"confidence": 0.99, "start": "0:00:00", "end": "0:00:29.6"}
+                        ],
+                    },
+                ],
+                "textualContentModeration": {
+                    "id": 0,
+                    "bannedWordsCount": 2,
+                    "bannedWordsRatio": 0.05,
+                    "instances": [],
+                },
             }
         }
     ]
@@ -138,6 +213,16 @@ def test_faces_extracted_with_confidence_and_appearances():
     assert len(jane.appearances) == 1
     assert jane.appearances[0].start_seconds == 1.0
     assert jane.appearances[0].end_seconds == 5.0
+
+
+def test_face_is_recognized_property_and_report_level_helper():
+    report = analyze_capabilities(SAMPLE_INDEX)
+    jane = next(f for f in report.faces if f.name == "Jane Doe")
+    unknown = next(f for f in report.faces if f.name == "Unknown #1")
+
+    assert jane.is_recognized is True
+    assert unknown.is_recognized is False
+    assert report.recognized_faces == [jane]
 
 
 def test_transcript_resolves_speaker_name_and_handles_missing_speaker():
@@ -223,6 +308,8 @@ def test_coverage_counts_match_each_bucket():
     assert coverage["audio_effects"] == 1
     assert coverage["shots"] == 2
     assert coverage["content_moderation_signals"] == 1
+    assert coverage["observed_people"] == 2
+    assert coverage["interaction_signals"] == 0
 
 
 def test_empty_payload_returns_empty_report_not_an_error():
@@ -231,4 +318,65 @@ def test_empty_payload_returns_empty_report_not_an_error():
     assert report.transcript == []
     assert report.named_entities == []
     assert report.content_moderation is None
+    assert report.observed_people == []
+    assert report.interaction_signals == []
     assert all(count == 0 for count in report.coverage.values())
+
+
+# ----------------------------------------------------------------------
+# observedPeople (body tracking, clothing, matchingFace resolution)
+# ----------------------------------------------------------------------
+
+
+def test_observed_people_extract_clothing_and_resolve_matched_face():
+    report = analyze_capabilities(SAMPLE_INDEX)
+    assert len(report.observed_people) == 2
+
+    matched = next(p for p in report.observed_people if p.person_id == 1)
+    assert matched.matched_face_name == "Jane Doe"
+    assert matched.matched_face_confidence == 1.0
+    assert matched.clothing == [ClothingItem(type="sleeve", length="long")]
+    assert matched.total_seen_seconds == 5.0
+
+    unmatched = next(p for p in report.observed_people if p.person_id == 2)
+    assert unmatched.matched_face_name is None
+    assert unmatched.clothing == [
+        ClothingItem(type="sleeve", length="long"),
+        ClothingItem(type="skirtAndDress", length=None),
+    ]
+
+
+def test_observed_people_absent_bucket_returns_empty_list():
+    report = analyze_capabilities({"videos": [{"insights": {"faces": []}}]})
+    assert report.observed_people == []
+
+
+# ----------------------------------------------------------------------
+# Interaction signals (curated labels) and the dict-shaped
+# textualContentModeration fix
+# ----------------------------------------------------------------------
+
+
+def test_interaction_signal_extracted_with_max_instance_confidence():
+    report = analyze_capabilities(REAL_SHAPED_INDEX)
+    assert len(report.interaction_signals) == 1
+    signal = report.interaction_signals[0]
+    assert signal.name == "kiss"
+    assert signal.confidence == 0.9699  # max across its two instances
+    assert len(signal.appearances) == 2
+
+
+def test_interaction_signals_ignore_unrelated_labels():
+    report = analyze_capabilities(REAL_SHAPED_INDEX)
+    assert all(s.name != "outdoor" for s in report.interaction_signals)
+
+
+def test_content_moderation_handles_dict_shaped_textual_bucket():
+    """Regression test: textualContentModeration returned as a single dict
+    (not a list) used to be silently treated as absent -- see
+    _first_moderation_item's docstring."""
+    report = analyze_capabilities(REAL_SHAPED_INDEX)
+    assert report.content_moderation is not None
+    assert report.content_moderation.textual_banned_words_count == 2
+    assert report.content_moderation.textual_banned_words_ratio == 0.05
+    assert report.content_moderation.has_any_signal

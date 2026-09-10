@@ -236,3 +236,77 @@ DATA_PLANE_BASE_URL = "https://api.videoindexer.ai"
 # Terminal states reported by the Video Indexer processing pipeline.
 STATE_PROCESSED = "Processed"
 STATE_FAILED = "Failed"
+
+# --- scene_summary.py: plain-language paragraph generation ---
+
+# Near-universal Video Indexer labels that describe *that* a person/face is
+# in frame, not anything distinctive about the scene -- excluded from both
+# the "persistent setting" and "notable moment" buckets since listing them
+# ("a person, their clothing, a human face...") adds no information; a
+# person's actual presence is instead reported via
+# `report.distinct_people_tracked` (observedPeople), which is more precise.
+SCENE_SUMMARY_BOILERPLATE_NAMES = {
+    "person",
+    "clothing",
+    "human face",
+    "people",
+    "clothes",
+}
+
+# A label spanning at least this fraction of the video's total duration is
+# treated as persistent/scene-setting rather than a punctual moment.
+SCENE_SUMMARY_PERSISTENT_COVERAGE_RATIO = 0.5
+
+# Cap how many notable moments / objects are named individually, so a
+# "busy" video with dozens of distinct labels still yields one readable
+# paragraph rather than an exhaustive dump.
+SCENE_SUMMARY_MAX_NOTABLE_MOMENTS = 5
+SCENE_SUMMARY_MAX_SETTING_TERMS = 3
+SCENE_SUMMARY_MAX_OBJECT_TERMS = 3
+
+# A tiny set of labels known to read naturally without an article ("a"/
+# "an") in front of them -- mass nouns and already-plural/compound phrases.
+# Everything else gets "a"/"an" picked by its first letter. This is a
+# heuristic, not a real grammar: it's meant to sound reasonably natural
+# for typical Video Indexer label vocabulary, not to be perfect for every
+# possible label.
+SCENE_SUMMARY_NO_ARTICLE_NAMES = {
+    "outerwear",
+    "clothing",
+    "street fashion",
+    "jewelry",
+    "makeup",
+    "footwear",
+}
+
+# "outdoor"/"indoor" are Video Indexer's own scene-type labels and are
+# common enough (and grammatically distinct -- an adjective, not a noun) to
+# special-case as the setting sentence's main clause ("takes place
+# outdoors") rather than trying to slot them in alongside noun labels like
+# "building" or "tree" ("with a building visible").
+SCENE_SUMMARY_LOCATION_LABELS = {"outdoor": "outdoors", "indoor": "indoors"}
+
+# Spelled-out small counts ("Three people") rather than starting a sentence
+# with a bare numeral, which reads oddly in prose.
+SCENE_SUMMARY_SMALL_NUMBER_WORDS = {
+    1: "One",
+    2: "Two",
+    3: "Three",
+    4: "Four",
+    5: "Five",
+    6: "Six",
+    7: "Seven",
+    8: "Eight",
+    9: "Nine",
+}
+
+# A summary's first/last_occurrence_seconds are the min-start/max-end
+# across *all* of its instances -- accurate for a single instance, or for
+# several instances close together, but misleading for two isolated blips
+# far apart (e.g. a coat glimpsed once at 10s and again at 27s would
+# otherwise read as "worn continuously from 10s to 27s"). A summary is
+# treated as "scattered" rather than "spanning" when its first-to-last
+# window is wide (> SCENE_SUMMARY_SCATTERED_MIN_SPAN_SECONDS) yet its
+# actual detected duration covers only a small fraction of that window.
+SCENE_SUMMARY_SCATTERED_MIN_SPAN_SECONDS = 3.0
+SCENE_SUMMARY_SCATTERED_MAX_COVERAGE_RATIO = 0.3

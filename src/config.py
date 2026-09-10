@@ -25,7 +25,8 @@ class ConfigError(RuntimeError):
 
 
 def _parse_positive_float(env_var: str, default: float) -> float:
-    """Parse an optional numeric override, falling back to `default` when
+    """
+    Parse an optional numeric override, falling back to `default` when
     the env var is unset or blank (e.g. an empty .env line), and raising
     ConfigError -- not a raw ValueError, which callers of from_env() don't
     expect to handle -- for a malformed or non-positive value. A timeout or

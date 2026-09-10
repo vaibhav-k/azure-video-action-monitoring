@@ -2,11 +2,25 @@
 Surfaces every Azure AI Video Indexer insight category this project doesn't
 already cover in action_analyzer.py -- faces, transcript/speakers/language,
 topics, named entities (brands/locations/people), sentiments, emotions,
-audio effects, shots, and content moderation -- as one "capabilities"
-report. Where action_analyzer.py answers "what actions/objects happened,
-and when", this module answers "what does Video Indexer know about this
-video besides that" -- the two are deliberately separate concerns, read by
+audio effects, shots, content moderation, observed-people body tracking
+(with detected clothing, when the account has it), and a curated set of
+interaction-shaped labels (e.g. "kiss") -- as one "capabilities" report.
+Where action_analyzer.py answers "what actions/objects happened, and when",
+this module answers "what does Video Indexer know about this video besides
+that" -- the two are deliberately separate concerns, read by
 explore_insights.py rather than the action-focused CLIs.
+
+Faces vs. observed people, worth stating plainly since it trips people up:
+these are two independent Video Indexer models that don't always agree on
+headcount. `faces` tracks distinct faces and can lose lock on the same
+physical person (a head turn, a profile view) and pick it back up as a new
+"Unknown #N" entry; `observedPeople` tracks bodies and can stay locked onto
+that same person the whole time. Cross-referencing the two by overlapping
+time ranges (see ObservedPersonInsight's docstring) is how to notice one
+real person got split into multiple face entries -- confirmed against a
+real capture from this project's own account (2026-09-09), where two
+"Unknown #N" faces with overlapping timestamps turned out to be one
+continuously-tracked observed-person body.
 
 Honest caveat up front: several of these buckets' exact field names are
 confirmed against Microsoft's own schema docs (video-indexer-output-json-v2,
@@ -34,6 +48,7 @@ from typing import Any, cast
 
 from src.action_analyzer import (
     _extract_insights,
+    _item_name,
     _iter_valid_instances,
     _timestamp_to_seconds,
     _video_duration_seconds,
@@ -59,6 +74,20 @@ class FaceInsight:
     confidence: float | None
     thumbnail_id: str | None
     appearances: list[Appearance] = field(default_factory=list)
+
+    @property
+    def is_recognized(self) -> bool:
+        """True when Video Indexer matched this face to a known identity (a
+        celebrity, or someone registered in this account's Person Model)
+        rather than merely detecting and tracking an unidentified face.
+        There's no separate boolean field for this in the raw payload --
+        every unmatched face is named "Unknown #N" and always reports
+        confidence 0, confirmed against this project's own captures -- so a
+        name that doesn't start with "Unknown" is the reliable signal.
+        `confidence` alone isn't: a low-but-nonzero match confidence would
+        still mean *some* identity was matched, just not confidently, so
+        name is checked rather than thresholding confidence."""
+        return not self.name.startswith("Unknown")
 
 
 @dataclass
@@ -144,6 +173,75 @@ class ContentModerationInsight:
 
 
 @dataclass
+class ClothingItem:
+    """One garment Video Indexer's detected-clothing feature identified on
+    an observed person -- confirmed against a real payload from this
+    project's own account (2026-09-09). Microsoft's docs describe detected
+    clothing as needing a separate Face Recognition approval; whether this
+    particular account already had that approval, or the requirement has
+    since loosened, isn't something this project can determine from here --
+    either way, treat its absence on a different account as "not available
+    there" rather than a bug in this extractor. Coarse by design: a garment
+    category (e.g. "sleeve", "pants", "skirtAndDress") plus an optional
+    length property (e.g. "short"/"long") -- no color or style, confirmed
+    against Microsoft's own detected-clothing doc."""
+
+    type: str
+    length: str | None = None
+
+
+@dataclass
+class ObservedPersonInsight:
+    """One tracked human body, from Video Indexer's `observedPeople`
+    insight -- a genuinely separate model from `faces` (FaceInsight above),
+    not just another view of the same data. The two trackers don't always
+    agree on headcount: a body can stay in continuous track through a head
+    turn or profile view that breaks face tracking, so one real person can
+    correspond to a single ObservedPersonInsight but multiple FaceInsight
+    entries (e.g. two "Unknown #N" faces) -- cross-referencing the two by
+    overlapping time ranges is how to notice this, since Video Indexer only
+    links them explicitly when `matched_face_confidence` is set."""
+
+    person_id: int
+    thumbnail_id: str | None
+    clothing: list[ClothingItem] = field(default_factory=list)
+    # Set only when Video Indexer itself linked this body to a specific
+    # tracked face (the `matchingFace` field) -- None means no link was
+    # made, not "no face present"; see class docstring on why body/face
+    # tracking can disagree on headcount.
+    matched_face_name: str | None = None
+    matched_face_confidence: float | None = None
+    appearances: list[Appearance] = field(default_factory=list)
+
+    @property
+    def total_seen_seconds(self) -> float:
+        return sum(a.end_seconds - a.start_seconds for a in self.appearances)
+
+
+@dataclass
+class InteractionSignal:
+    """A generic label/keyword Video Indexer tagged that plausibly names a
+    physical interaction between two or more people (e.g. "kiss", "hug",
+    "handshake") -- NOT a dedicated interaction-detection insight, since
+    Video Indexer has none. `_INTERACTION_LABEL_NAMES` is a hand-curated
+    subset of its generic labels/keywords vocabulary seeded from what this
+    project has actually observed in a real capture ("kiss"), not from an
+    exhaustive Microsoft-documented list of every interaction-shaped label
+    that could appear -- extend it as more are observed. Same honest-
+    caveat strength as the rest of this project's label-based signals: a
+    lead worth reviewing, not a confirmed claim about what happened."""
+
+    name: str
+    confidence: float | None
+    appearances: list[Appearance] = field(default_factory=list)
+
+
+_INTERACTION_LABEL_NAMES = frozenset(
+    {"kiss", "hug", "embrace", "handshake", "fight", "dance"}
+)
+
+
+@dataclass
 class CapabilitiesReport:
     """Every non-action insight Video Indexer returned for one video."""
 
@@ -159,6 +257,14 @@ class CapabilitiesReport:
     audio_effects: list[AudioEffectInsight] = field(default_factory=list)
     shots: list[ShotInsight] = field(default_factory=list)
     content_moderation: ContentModerationInsight | None = None
+    observed_people: list[ObservedPersonInsight] = field(default_factory=list)
+    interaction_signals: list[InteractionSignal] = field(default_factory=list)
+
+    @property
+    def recognized_faces(self) -> list[FaceInsight]:
+        """Faces Video Indexer matched to a known identity, rather than
+        just tracking as "Unknown #N" -- see FaceInsight.is_recognized."""
+        return [f for f in self.faces if f.is_recognized]
 
     @property
     def coverage(self) -> dict[str, int]:
@@ -182,6 +288,8 @@ class CapabilitiesReport:
                 if (self.content_moderation and self.content_moderation.has_any_signal)
                 else 0
             ),
+            "observed_people": len(self.observed_people),
+            "interaction_signals": len(self.interaction_signals),
         }
 
 
@@ -462,25 +570,39 @@ def _shots(insights: dict[str, Any]) -> list[ShotInsight]:
     return shots
 
 
+def _first_moderation_item(bucket: Any) -> dict[str, Any] | None:
+    """`visualContentModeration`/`textualContentModeration` were assumed to
+    always be a list of items (`[0]` taken as "the" result) -- a real
+    payload from this project's own account (2026-09-09) showed
+    `textualContentModeration` returned as a single dict instead, which the
+    old list-only check silently treated as "bucket absent" rather than
+    parsing it (no crash, just quietly dropped real data -- exactly the
+    kind of gap this module's defensive-parsing stance exists to catch).
+    Handles both shapes now."""
+    if isinstance(bucket, dict):
+        return cast("dict[str, Any]", bucket)
+    if isinstance(bucket, list) and bucket:
+        return cast("dict[str, Any]", bucket[0])
+    return None
+
+
 def _content_moderation(insights: dict[str, Any]) -> ContentModerationInsight | None:
-    visual = insights.get("visualContentModeration")
-    textual = insights.get("textualContentModeration")
-    if not isinstance(visual, list) and not isinstance(textual, list):
+    visual = _first_moderation_item(insights.get("visualContentModeration"))
+    textual = _first_moderation_item(insights.get("textualContentModeration"))
+    if visual is None and textual is None:
         return None
 
     result = ContentModerationInsight()
-    if isinstance(visual, list) and visual:
-        first = cast("dict[str, Any]", visual[0])
-        adult, racy = first.get("adultScore"), first.get("racyScore")
+    if visual is not None:
+        adult, racy = visual.get("adultScore"), visual.get("racyScore")
         result.visual_adult_score = (
             float(adult) if isinstance(adult, (int, float)) else None
         )
         result.visual_racy_score = (
             float(racy) if isinstance(racy, (int, float)) else None
         )
-    if isinstance(textual, list) and textual:
-        first = cast("dict[str, Any]", textual[0])
-        count, ratio = first.get("bannedWordsCount"), first.get("bannedWordsRatio")
+    if textual is not None:
+        count, ratio = textual.get("bannedWordsCount"), textual.get("bannedWordsRatio")
         result.textual_banned_words_count = (
             int(count) if isinstance(count, (int, float)) else None
         )
@@ -488,6 +610,119 @@ def _content_moderation(insights: dict[str, Any]) -> ContentModerationInsight | 
             float(ratio) if isinstance(ratio, (int, float)) else None
         )
     return result
+
+
+def _face_id_to_name(insights: dict[str, Any]) -> dict[Any, str]:
+    """Map a `faces` item's raw `id` to its `name`, for resolving
+    `observedPeople[].matchingFace.id` back to a human-readable face name
+    in `_observed_people`. Kept separate from FaceInsight, which doesn't
+    carry the raw numeric id -- this mapping is only ever used internally,
+    right after extraction, while both buckets' raw items are on hand."""
+    bucket = insights.get("faces")
+    if not isinstance(bucket, list):
+        return {}
+    mapping: dict[Any, str] = {}
+    for raw in cast("list[Any]", bucket):
+        item = cast("dict[str, Any]", raw)
+        face_id = item.get("id")
+        name = item.get("name") or item.get("title")
+        if face_id is not None and name:
+            mapping[face_id] = name
+    return mapping
+
+
+def _clothing_items(raw_clothing: Any) -> list[ClothingItem]:
+    if not isinstance(raw_clothing, list):
+        return []
+    items: list[ClothingItem] = []
+    for raw in cast("list[Any]", raw_clothing):
+        item = cast("dict[str, Any]", raw)
+        clothing_type = item.get("type")
+        if not clothing_type:
+            continue
+        properties = item.get("properties")
+        length = (
+            cast("dict[str, Any]", properties).get("length")
+            if isinstance(properties, dict)
+            else None
+        )
+        items.append(ClothingItem(type=clothing_type, length=length))
+    return items
+
+
+def _observed_people(insights: dict[str, Any]) -> list[ObservedPersonInsight]:
+    """`observedPeople` -- Video Indexer's body/person tracker, a genuinely
+    separate model from `faces` (see ObservedPersonInsight docstring).
+    `clothing`/`matchingFace` confirmed against a real payload from this
+    project's own account (2026-09-09) -- see ClothingItem's docstring on
+    why that account had detected clothing enabled at all. Absence on
+    another account just means "not available there", not a parsing bug;
+    every field is read defensively regardless."""
+    bucket = insights.get("observedPeople")
+    if not isinstance(bucket, list):
+        return []
+    face_names = _face_id_to_name(insights)
+
+    people: list[ObservedPersonInsight] = []
+    for raw in cast("list[Any]", bucket):
+        item = cast("dict[str, Any]", raw)
+        person_id = item.get("id")
+        if person_id is None:
+            continue
+        matched_face_name: str | None = None
+        matched_face_confidence: float | None = None
+        matching_face = item.get("matchingFace")
+        if isinstance(matching_face, dict):
+            matching_face_dict = cast("dict[str, Any]", matching_face)
+            matched_face_name = face_names.get(matching_face_dict.get("id"))
+            confidence = matching_face_dict.get("confidence")
+            matched_face_confidence = (
+                float(confidence) if isinstance(confidence, (int, float)) else None
+            )
+        people.append(
+            ObservedPersonInsight(
+                person_id=int(person_id),
+                thumbnail_id=item.get("thumbnailId"),
+                clothing=_clothing_items(item.get("clothing")),
+                matched_face_name=matched_face_name,
+                matched_face_confidence=matched_face_confidence,
+                appearances=_appearances(item),
+            )
+        )
+    return people
+
+
+def _interaction_signals(insights: dict[str, Any]) -> list[InteractionSignal]:
+    """A curated subset of generic `labels`/`keywords` that name a physical
+    interaction between people -- see InteractionSignal's docstring on why
+    this isn't a dedicated Video Indexer insight. These items' `confidence`
+    lives per-instance, not at the top level (confirmed against a real
+    "kiss" label capture), so the reported confidence is the max across
+    that label's instances when no top-level value is present."""
+    signals: list[InteractionSignal] = []
+    for bucket_name in ("labels", "keywords"):
+        bucket = insights.get(bucket_name)
+        if not isinstance(bucket, list):
+            continue
+        for raw in cast("list[Any]", bucket):
+            item = cast("dict[str, Any]", raw)
+            name = _item_name(item)
+            if name.lower() not in _INTERACTION_LABEL_NAMES:
+                continue
+            appearances = _appearances(item)
+            confidence = item.get("confidence")
+            if confidence is None:
+                scored = [a.confidence for a in appearances if a.confidence is not None]
+                confidence = max(scored) if scored else None
+            signals.append(
+                InteractionSignal(
+                    name=name,
+                    confidence=float(confidence) if confidence is not None else None,
+                    appearances=appearances,
+                )
+            )
+    signals.sort(key=lambda s: s.appearances[0].start_seconds if s.appearances else 0.0)
+    return signals
 
 
 def analyze_capabilities(index_payload: dict[str, Any]) -> CapabilitiesReport:
@@ -515,4 +750,6 @@ def analyze_capabilities(index_payload: dict[str, Any]) -> CapabilitiesReport:
         audio_effects=_audio_effects(insights),
         shots=_shots(insights),
         content_moderation=_content_moderation(insights),
+        observed_people=_observed_people(insights),
+        interaction_signals=_interaction_signals(insights),
     )

@@ -209,7 +209,8 @@ def _extract_insights(index_payload: dict[str, Any]) -> dict[str, Any]:
 def _video_duration_seconds(
     index_payload: dict[str, Any], insights: dict[str, Any]
 ) -> float | None:
-    """Best-effort extraction of the video's total duration, in seconds.
+    """
+    Best-effort extraction of the video's total duration, in seconds.
 
     `insights.duration` is tried first, with `durationInSeconds` (a plain
     top-level number) as the fallback when it's absent or unparseable.
