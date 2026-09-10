@@ -2,7 +2,3 @@ requests>=2.31
 azure-identity>=1.16
 python-dotenv>=1.0
 pytest==9.1.1
-
-# Only needed by annotate_video.py (rendering burned-in overlays).
-opencv-python-headless>=4.9
-numpy>=1.26
