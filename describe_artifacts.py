@@ -149,7 +149,7 @@ def _as_dict_list(value: Any) -> list[dict[str, Any]]:
     degrades to "nothing found" instead of raising."""
     if not isinstance(value, list):
         return []
-    return [cast(dict[str, Any], entry) for entry in value if isinstance(entry, dict)]
+    return [cast("dict[str, Any]", entry) for entry in value if isinstance(entry, dict)]
 
 
 def _parse_timestamp(value: str) -> float:
@@ -312,8 +312,8 @@ def _parse_ocr_snippets(folder: Path) -> list[OcrSnippet]:
     counts: dict[str, int] = {}
     for frame in _as_dict_list(data.get("Results")):
         content = (frame.get("Ocr") or {}).get("content") or ""
-        for line in content.split("\n"):
-            line = line.strip()
+        for raw_line in content.split("\n"):
+            line = raw_line.strip()
             if len(line) < 3 or line.strip("-") == "":
                 continue
             counts[line] = counts.get(line, 0) + 1

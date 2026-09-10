@@ -288,8 +288,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         client = _build_client_if_needed(args)
-    except ConfigError as exc:
-        logger.error(str(exc))
+    except ConfigError:
+        logger.exception("Failed to build Video Indexer client")
         return 2
 
     try:
@@ -329,8 +329,8 @@ def main(argv: list[str] | None = None) -> int:
                 min_temporal_iou=args.min_temporal_iou,
                 require_single_person=args.require_single_person,
             ).actions
-    except (VideoIndexerError, VideoAnnotationError) as exc:
-        logger.error("Could not obtain actions: %s", exc)
+    except (VideoIndexerError, VideoAnnotationError):
+        logger.exception("Could not obtain actions")
         return 1
 
     actions = _filter_only_composite(actions, args.only_composite)
@@ -345,8 +345,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         frame_source = _resolve_frame_source(client, args)
-    except VideoIndexerError as exc:
-        logger.error("Could not download source video for frames: %s", exc)
+    except VideoIndexerError:
+        logger.exception("Could not download source video for frames")
         return 1
 
     suffix = "composite_actions.annotated" if args.only_composite else "annotated"
@@ -362,8 +362,8 @@ def main(argv: list[str] | None = None) -> int:
             max_lines=args.max_lines,
             keep_audio=not args.no_audio,
         )
-    except VideoAnnotationError as exc:
-        logger.error(str(exc))
+    except VideoAnnotationError:
+        logger.exception("Failed to render annotated video")
         return 1
 
     logger.info("Wrote annotated video to %s", written)

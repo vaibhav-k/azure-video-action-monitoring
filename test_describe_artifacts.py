@@ -9,17 +9,18 @@ or network access.
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import describe_artifacts as da
 
 
-def _write_json(folder: Path, filename: str, data: dict) -> None:
+def _write_json(folder: Path, filename: str, data: dict[str, Any]) -> None:
     (folder / filename).write_text(json.dumps(data), encoding="utf-8")
 
 
-def _labels_payload(*frames: list[tuple[str, float]]) -> dict:
+def _labels_payload(*frames: list[tuple[str, float]]) -> dict[str, Any]:
     return {
         "Fps": 30.0,
         "Results": [
@@ -40,7 +41,7 @@ def _labels_payload(*frames: list[tuple[str, float]]) -> dict:
     }
 
 
-def _objects_payload(*tracks: tuple[str, str, str]) -> dict:
+def _objects_payload(*tracks: tuple[str, str, str]) -> dict[str, Any]:
     """Each track is (type, start, end); one instance at each end."""
     return {
         "algoVersion": "test",
@@ -70,7 +71,7 @@ def _objects_payload(*tracks: tuple[str, str, str]) -> dict:
     }
 
 
-def _ocr_payload(*contents: str) -> dict:
+def _ocr_payload(*contents: str) -> dict[str, Any]:
     return {
         "Fps": 30.0,
         "Results": [
@@ -80,7 +81,7 @@ def _ocr_payload(*contents: str) -> dict:
     }
 
 
-def _moderation_payload(*scores: tuple[float, float, float, bool]) -> dict:
+def _moderation_payload(*scores: tuple[float, float, float, bool]) -> dict[str, Any]:
     return {
         "Fps": 30.0,
         "Results": [

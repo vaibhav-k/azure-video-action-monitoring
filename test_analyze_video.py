@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import analyze_video as av
@@ -129,7 +131,7 @@ def test_looks_like_activity_accepts_genuine_multi_word_activity_labels():
 # ----------------------------------------------------------------------
 
 
-def test_analyze_insights_extracts_duration_people_labels_objects():
+def test_analyze_insights_extracts_duration_people_labels_objects() -> None:
     raw = _raw_payload(
         labels=[_label("outdoor", ("0:00:00", "0:01:00", 0.99))],
         observed_people=[_observed_person(1, ("0:00:00", "0:00:30"))],
@@ -154,7 +156,7 @@ def test_analyze_insights_extracts_duration_people_labels_objects():
     assert analysis.objects[0].name == "backpack"
 
 
-def test_activity_associated_with_single_overlapping_person():
+def test_activity_associated_with_single_overlapping_person() -> None:
     raw = _raw_payload(
         labels=[_label("running", ("0:00:18", "0:00:27", 0.87))],
         observed_people=[_observed_person(2, ("0:00:15", "0:00:30"))],
@@ -170,7 +172,7 @@ def test_activity_associated_with_single_overlapping_person():
     assert "inferred" in activity.association_note
 
 
-def test_activity_left_unassigned_when_no_person_overlaps():
+def test_activity_left_unassigned_when_no_person_overlaps() -> None:
     raw = _raw_payload(
         labels=[_label("walking", ("0:00:04", "0:00:12", 0.91))],
         observed_people=[_observed_person(1, ("0:00:40", "0:00:50"))],  # no overlap
@@ -185,7 +187,7 @@ def test_activity_left_unassigned_when_no_person_overlaps():
     assert "no observed-people appearance overlapped" in activity.association_note
 
 
-def test_activity_left_unassigned_when_multiple_people_overlap():
+def test_activity_left_unassigned_when_multiple_people_overlap() -> None:
     raw = _raw_payload(
         labels=[_label("talking", ("0:00:32", "0:00:47", 0.79))],
         observed_people=[
@@ -202,7 +204,7 @@ def test_activity_left_unassigned_when_multiple_people_overlap():
     assert "ambiguous" in activity.association_note
 
 
-def test_non_activity_labels_excluded_from_activities_but_kept_in_labels():
+def test_non_activity_labels_excluded_from_activities_but_kept_in_labels() -> None:
     raw = _raw_payload(
         labels=[
             _label("outdoor", ("0:00:00", "0:01:00", 0.99)),
@@ -217,7 +219,7 @@ def test_non_activity_labels_excluded_from_activities_but_kept_in_labels():
     assert analysis.activities[0].name == "running"
 
 
-def test_matched_face_name_used_when_video_indexer_links_them():
+def test_matched_face_name_used_when_video_indexer_links_them() -> None:
     raw = _raw_payload(
         labels=[_label("dancing", ("0:00:00", "0:00:05", 0.8))],
         observed_people=[
@@ -243,7 +245,7 @@ def test_matched_face_name_used_when_video_indexer_links_them():
 # ----------------------------------------------------------------------
 
 
-def test_to_activities_dict_matches_required_shape_and_has_no_bounding_boxes():
+def test_to_activities_dict_matches_required_shape_and_has_no_bounding_boxes() -> None:
     raw = _raw_payload(
         labels=[_label("running", ("0:00:18", "0:00:27", 0.87))],
         observed_people=[_observed_person(2, ("0:00:15", "0:00:30"))],
@@ -266,7 +268,7 @@ def test_to_activities_dict_matches_required_shape_and_has_no_bounding_boxes():
 # ----------------------------------------------------------------------
 
 
-def test_render_report_matches_example_line_format():
+def test_render_report_matches_example_line_format() -> None:
     raw = _raw_payload(
         labels=[
             _label("walking", ("0:00:04", "0:00:12", 0.91)),
@@ -289,7 +291,7 @@ def test_render_report_matches_example_line_format():
     assert "not output from a dedicated human-action-recognition model" in report
 
 
-def test_render_report_handles_no_activities_gracefully():
+def test_render_report_handles_no_activities_gracefully() -> None:
     raw = _raw_payload(labels=[_label("outdoor", ("0:00:00", "0:00:05", 0.9))])
     analysis = av.analyze_insights(raw, video_filename="quiet.mp4")
 
@@ -299,7 +301,7 @@ def test_render_report_handles_no_activities_gracefully():
     assert "No activity-shaped labels were detected" in report
 
 
-def test_render_report_includes_summary_section():
+def test_render_report_includes_summary_section() -> None:
     raw = _raw_payload(
         labels=[
             _label("walking", ("0:00:04", "0:00:12", 0.91)),
@@ -320,7 +322,7 @@ def test_render_report_includes_summary_section():
 # ----------------------------------------------------------------------
 
 
-def test_build_summary_handles_no_people_or_activities():
+def test_build_summary_handles_no_people_or_activities() -> None:
     analysis = av.analyze_insights(
         _raw_payload(duration_seconds=10.0), video_filename="quiet.mp4"
     )
@@ -331,7 +333,7 @@ def test_build_summary_handles_no_people_or_activities():
     assert "No activity-shaped labels came back for it" in summary
 
 
-def test_build_summary_reports_dominant_activity_and_full_association():
+def test_build_summary_reports_dominant_activity_and_full_association() -> None:
     raw = _raw_payload(
         labels=[_label("running", ("0:00:18", "0:00:27", 0.87))],
         observed_people=[_observed_person(2, ("0:00:15", "0:00:30"))],
@@ -345,7 +347,7 @@ def test_build_summary_reports_dominant_activity_and_full_association():
     assert "That lines up cleanly with the one tracked person" in summary
 
 
-def test_build_summary_reports_partial_association():
+def test_build_summary_reports_partial_association() -> None:
     raw = _raw_payload(
         labels=[
             _label("running", ("0:00:18", "0:00:27", 0.87)),  # 1 overlap -> assigned
@@ -365,7 +367,7 @@ def test_build_summary_reports_partial_association():
     assert "the other one doesn't" in summary
 
 
-def test_build_summary_reads_as_natural_prose_not_a_template():
+def test_build_summary_reads_as_natural_prose_not_a_template() -> None:
     # Guards against regressing back to the old robotic phrasing this was
     # explicitly rewritten away from (e.g. "1 tracked person",
     # "activity-shaped label occurrences across N distinct activities").
@@ -404,7 +406,7 @@ def _simple_raw_payload() -> dict[str, Any]:
     return _raw_payload(labels=[_label("running", ("0:00:00", "0:00:05", 0.9))])
 
 
-def test_process_video_writes_all_three_artifacts(tmp_path: Path):
+def test_process_video_writes_all_three_artifacts(tmp_path: Path) -> None:
     client = FakeVideoIndexerClient(_simple_raw_payload())
     video_path = tmp_path / "demo.mp4"
     video_path.write_bytes(b"fake video bytes")
@@ -419,7 +421,7 @@ def test_process_video_writes_all_three_artifacts(tmp_path: Path):
     assert client.index_video_calls == ["demo"]
 
 
-def test_process_video_skips_when_already_processed(tmp_path: Path):
+def test_process_video_skips_when_already_processed(tmp_path: Path) -> None:
     client = FakeVideoIndexerClient(_simple_raw_payload())
     video_path = tmp_path / "demo.mp4"
     video_path.write_bytes(b"fake video bytes")
@@ -432,7 +434,7 @@ def test_process_video_skips_when_already_processed(tmp_path: Path):
     assert client.index_video_calls == ["demo"]  # not called a second time
 
 
-def test_process_video_force_reprocesses(tmp_path: Path):
+def test_process_video_force_reprocesses(tmp_path: Path) -> None:
     client = FakeVideoIndexerClient(_simple_raw_payload())
     video_path = tmp_path / "demo.mp4"
     video_path.write_bytes(b"fake video bytes")
@@ -462,7 +464,7 @@ class FakeIdVideoIndexerClient:
 
 def test_process_video_by_id_writes_all_three_artifacts_using_returned_name(
     tmp_path: Path,
-):
+) -> None:
     raw = _simple_raw_payload()
     raw["name"] = "already-indexed-clip"
     client = FakeIdVideoIndexerClient(raw)
@@ -477,7 +479,9 @@ def test_process_video_by_id_writes_all_three_artifacts_using_returned_name(
     assert client.wait_for_processing_calls == ["abc123"]
 
 
-def test_process_video_by_id_falls_back_to_video_id_when_name_missing(tmp_path: Path):
+def test_process_video_by_id_falls_back_to_video_id_when_name_missing(
+    tmp_path: Path,
+) -> None:
     client = FakeIdVideoIndexerClient(_simple_raw_payload())  # no "name" key
     out_dir = tmp_path / "output"
 
@@ -486,7 +490,7 @@ def test_process_video_by_id_falls_back_to_video_id_when_name_missing(tmp_path: 
     assert (out_dir / "abc123.insights.json").is_file()
 
 
-def test_process_video_by_id_skips_when_already_processed(tmp_path: Path):
+def test_process_video_by_id_skips_when_already_processed(tmp_path: Path) -> None:
     raw = _simple_raw_payload()
     raw["name"] = "already-indexed-clip"
     client = FakeIdVideoIndexerClient(raw)
@@ -501,7 +505,7 @@ def test_process_video_by_id_skips_when_already_processed(tmp_path: Path):
     assert client.wait_for_processing_calls == ["abc123", "abc123"]
 
 
-def test_process_video_by_id_force_reprocesses(tmp_path: Path):
+def test_process_video_by_id_force_reprocesses(tmp_path: Path) -> None:
     raw = _simple_raw_payload()
     raw["name"] = "already-indexed-clip"
     client = FakeIdVideoIndexerClient(raw)
@@ -513,7 +517,9 @@ def test_process_video_by_id_force_reprocesses(tmp_path: Path):
     assert ran_again is True
 
 
-def test_print_activity_associations_logs_person_activity_lines(caplog):
+def test_print_activity_associations_logs_person_activity_lines(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     raw = _raw_payload(
         labels=[_label("running", ("0:00:18", "0:00:27", 0.87))],
         observed_people=[_observed_person(2, ("0:00:15", "0:00:30"))],
@@ -526,7 +532,9 @@ def test_print_activity_associations_logs_person_activity_lines(caplog):
     assert "00:18 - 00:27   Person 2: running   confidence: 0.87" in caplog.text
 
 
-def test_print_activity_associations_handles_no_activities(caplog):
+def test_print_activity_associations_handles_no_activities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     analysis = av.analyze_insights(_raw_payload(), video_filename="quiet.mp4")
 
     with caplog.at_level("INFO", logger="analyze_video"):
@@ -535,13 +543,13 @@ def test_print_activity_associations_handles_no_activities(caplog):
     assert "no activity-shaped labels detected" in caplog.text
 
 
-def test_build_arg_parser_accepts_video_id():
+def test_build_arg_parser_accepts_video_id() -> None:
     args = av.build_arg_parser().parse_args(["--video-id", "abc123"])
     assert args.video_id == "abc123"
     assert args.video is None
 
 
-def test_main_rejects_video_and_video_id_together(tmp_path: Path):
+def test_main_rejects_video_and_video_id_together(tmp_path: Path) -> None:
     exit_code = av.main(
         [
             "--video",
@@ -557,7 +565,7 @@ def test_main_rejects_video_and_video_id_together(tmp_path: Path):
     assert exit_code == 2
 
 
-def test_discover_batch_videos_finds_only_supported_extensions(tmp_path: Path):
+def test_discover_batch_videos_finds_only_supported_extensions(tmp_path: Path) -> None:
     (tmp_path / "clip.mp4").write_bytes(b"x")
     (tmp_path / "clip.mov").write_bytes(b"x")
     (tmp_path / "notes.txt").write_bytes(b"x")
@@ -569,7 +577,7 @@ def test_discover_batch_videos_finds_only_supported_extensions(tmp_path: Path):
     assert names == ["clip.MP4", "clip.mov", "clip.mp4"]
 
 
-def test_discover_batch_videos_empty_when_dir_missing(tmp_path: Path):
+def test_discover_batch_videos_empty_when_dir_missing(tmp_path: Path) -> None:
     assert av._discover_batch_videos(tmp_path / "does_not_exist") == []
 
 
@@ -578,7 +586,9 @@ def test_discover_batch_videos_empty_when_dir_missing(tmp_path: Path):
 # ----------------------------------------------------------------------
 
 
-def test_settings_from_env_raises_config_error_when_missing(monkeypatch):
+def test_settings_from_env_raises_config_error_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for name in (
         "AVI_SUBSCRIPTION_ID",
         "AVI_RESOURCE_GROUP",
@@ -595,7 +605,7 @@ def test_settings_from_env_raises_config_error_when_missing(monkeypatch):
         assert "AVI_SUBSCRIPTION_ID" in str(exc)
 
 
-def test_settings_from_env_reads_all_values(monkeypatch):
+def test_settings_from_env_reads_all_values(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AVI_SUBSCRIPTION_ID", "sub-id")
     monkeypatch.setenv("AVI_RESOURCE_GROUP", "rg")
     monkeypatch.setenv("AVI_ACCOUNT_NAME", "account")
@@ -606,3 +616,7 @@ def test_settings_from_env_reads_all_values(monkeypatch):
 
     assert settings.subscription_id == "sub-id"
     assert settings.indexing_preset == "Advanced"  # default
+    assert settings.resource_group == "rg"
+    assert settings.account_name == "account"
+    assert settings.account_id == "account-id"
+    assert settings.location == "eastus"

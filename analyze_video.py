@@ -620,7 +620,7 @@ def _as_dict_list(value: Any) -> list[dict[str, Any]]:
     value degrades to "nothing found" instead of raising."""
     if not isinstance(value, list):
         return []
-    return [cast(dict[str, Any], entry) for entry in value if isinstance(entry, dict)]
+    return [cast("dict[str, Any]", entry) for entry in value if isinstance(entry, dict)]
 
 
 def _extract_insights(raw: dict[str, Any]) -> dict[str, Any]:
@@ -641,13 +641,13 @@ def _extract_insights(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _instances_of(item: dict[str, Any]) -> list[Instance]:
-    result = []
+    result: list[Instance] = []
     for inst in _as_dict_list(item.get("instances")):
         start = inst.get("adjustedStart") or inst.get("start")
         end = inst.get("adjustedEnd") or inst.get("end")
         if not start or not end:
             continue
-        result.append(
+        result.append( # type: ignore
             Instance(
                 start_seconds=_parse_vi_timestamp(start),
                 end_seconds=_parse_vi_timestamp(end),
@@ -681,7 +681,7 @@ def _extract_people(insights: dict[str, Any]) -> list[Person]:
         person_id = item.get("id")
         if person_id is None:
             continue
-        matching_face = item.get("matchingFace") or {}
+        matching_face: dict[str, Any] = item.get("matchingFace") or {}
         face_id = matching_face.get("id")
         confidence = matching_face.get("confidence")
         label = (

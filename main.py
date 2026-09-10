@@ -158,8 +158,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings = Settings.from_env()
-    except ConfigError as exc:
-        logger.error(str(exc))
+    except ConfigError:
+        logger.exception("Failed to load settings from environment")
         return 2
 
     client = VideoIndexerClient(settings)
@@ -174,8 +174,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             client.get_access_token()
-        except VideoIndexerError as exc:
-            logger.error(str(exc))
+        except VideoIndexerError:
+            logger.exception("Video Indexer authentication failed")
             return 1
         logger.info(
             "Success: obtained a Video Indexer access token. Config and permissions look good."
@@ -206,8 +206,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.indexing_preset,
             )
             index = client.wait_for_processing(video_id)
-    except VideoIndexerError as exc:
-        logger.error("Video Indexer processing failed: %s", exc)
+    except VideoIndexerError:
+        logger.exception("Video Indexer processing failed")
         return 1
 
     if args.save_raw_insights:
